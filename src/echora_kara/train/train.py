@@ -1785,6 +1785,58 @@ def head_warmup_optimizer(
     return optimizer, schedule
 
 
+def windows_seen(history: list[tuple[int, int]], step: int) -> int:
+    """Training windows consumed by optimizer step ``step``, given ``(from_step, windows_per_step)`` segments."""
+    total = 0
+    for index, (start, per_step) in enumerate(history):
+        stop = history[index + 1][0] if index + 1 < len(history) else step
+        total += max(0, min(step, stop) - start) * per_step
+    return total
+
+
+# What --extend-schedule may change on resume: (section of data_identity.json or None for the top level, key).
+EXTENDABLE = {
+    (None, "batch_size"),
+    (None, "gradient_accumulation"),
+    ("training_recipe", "max_steps"),
+    ("training_recipe", "decay_steps"),
+}
+
+
+def extend_identity(old: dict, new: dict, step: int) -> dict:
+    """``new`` with the schedule history carried over and, when the schedule or windows per step changed at
+    ``step``, a new segment appended. Raises ``ValueError`` when anything outside ``EXTENDABLE`` differs."""
+
+    def strip(identity):
+        out = {k: v for k, v in identity.items() if k != "schedule_history" and (None, k) not in EXTENDABLE}
+        out["training_recipe"] = {
+            k: v for k, v in identity.get("training_recipe", {}).items() if ("training_recipe", k) not in EXTENDABLE
+        }
+        return out
+
+    if strip(old) != strip(new):
+        changed = sorted({k for k in set(strip(old)) | set(strip(new)) if strip(old).get(k) != strip(new).get(k)})
+        raise ValueError(f"--extend-schedule only changes steps, decay and batch; also changed: {changed}")
+
+    def segment(identity, from_step):
+        recipe = identity["training_recipe"]
+        return {
+            "from_step": from_step,
+            "windows_per_step": identity["batch_size"] * identity["gradient_accumulation"] * identity["world_size"],
+            "batch_size": identity["batch_size"],
+            "gradient_accumulation": identity["gradient_accumulation"],
+            "max_steps": recipe["max_steps"],
+            "decay_steps": recipe.get("decay_steps"),
+        }
+
+    history = list(old.get("schedule_history") or [segment(old, 0)])
+    if {k: v for k, v in segment(new, step).items() if k != "from_step"} != {
+        k: v for k, v in history[-1].items() if k != "from_step"
+    }:
+        history.append(segment(new, step))
+    return {**new, "schedule_history": history}
+
+
 class PartsTrainer(Trainer):
     """Trainer that also logs the model's unweighted loss components (``model._loss_parts``) next to the
     total: ``loss_<part>`` averaged over the logging interval, ``eval_loss_<part>`` over each evaluation."""
@@ -1793,6 +1845,29 @@ class PartsTrainer(Trainer):
         super().__init__(*args, **kwargs)
         self._parts = {True: {}, False: {}}  # training? -> name -> [sum, count]
         self.decoded_eval = decoded_eval  # decoded_eval.DecodedEval: whole-song timing at each evaluation
+        self.window_history = []  # [(from_step, windows_per_step)]: set by main from schedule_history
+
+    def _init_training_state(
+        self, max_steps, num_update_steps_per_epoch, num_train_epochs, resume_from_checkpoint, trial
+    ):
+        """The usual resume position, except after a change in windows per step (``--extend-schedule``): HF counts
+        the batches to skip in the CURRENT batch size, so convert the windows actually trained into epochs and
+        batches instead. The epoch order (a seeded permutation of the windows) does not depend on the batch size,
+        so this lands on the next unseen window."""
+        epochs, batches = super()._init_training_state(
+            max_steps, num_update_steps_per_epoch, num_train_epochs, resume_from_checkpoint, trial
+        )
+        if resume_from_checkpoint is None or self.args.ignore_data_skip or len(self.window_history) < 2:
+            return epochs, batches
+        seen = windows_seen(self.window_history, self.state.global_step)
+        per_epoch = len(self.train_dataset)
+        epochs, batches = seen // per_epoch, (seen % per_epoch) // self.args.per_device_train_batch_size
+        print(
+            f"resume by window count: {seen} windows trained -> epoch {epochs}, skipping {batches} batches of "
+            f"{self.args.per_device_train_batch_size}",
+            flush=True,
+        )
+        return epochs, batches
 
     def evaluate(self, *args, **kwargs):
         """The usual evaluation, then the whole-song decoded-timing eval (when configured) logged as ``eval_*``."""
@@ -2097,6 +2172,14 @@ def arguments():
         help="stop after --guard-patience logged grad norms above this (0: off)",
     )
     guard.add_argument("--guard-patience", type=int, default=5)
+    guard.add_argument(
+        "--extend-schedule",
+        action="store_true",
+        help="with --resume: allow --max-steps, --decay-steps, --batch-size and --gradient-accumulation to differ "
+        "from the recorded run (e.g. a longer constant phase, or more windows per step on a bigger GPU). The data "
+        "position carries over by window count, so training continues with the next unseen window; the change is "
+        "kept in data_identity.json's schedule_history",
+    )
     guard.add_argument(
         "--guard-eval-rise",
         type=float,
@@ -2910,7 +2993,18 @@ def main():
     }
     identity_path = args.output / "data_identity.json"
     resume = get_last_checkpoint(str(args.output)) if args.resume else None
-    validate_resume(identity_path, identity, args.resume, resume)
+    recorded = json.loads(identity_path.read_text()) if resume and identity_path.exists() else {}
+    if args.extend_schedule:
+        if not resume or not recorded:
+            raise ValueError("--extend-schedule needs --resume and a recorded run")
+        identity = extend_identity(recorded, identity, int(Path(resume).name.rsplit("-", 1)[1]))
+        # Same data, same everything else: check completeness against the recorded identity, then record the change.
+        validate_resume(identity_path, {**recorded}, args.resume, resume)
+    else:
+        if "schedule_history" in recorded:
+            identity["schedule_history"] = recorded["schedule_history"]
+        validate_resume(identity_path, identity, args.resume, resume)
+    trainer.window_history = [(h["from_step"], h["windows_per_step"]) for h in identity.get("schedule_history", [])]
     if not args.resume and get_last_checkpoint(str(args.output)):
         raise ValueError("Output already contains checkpoints; use --resume or a new directory")
     identity_path.write_text(json.dumps(identity, indent=2) + "\n")
