@@ -2,8 +2,6 @@
 ruby readings written as ``kanji|<reading`` (``#|reading`` for a continuation), lead-in and lead-out of ``pretime`` /
 ``posttime`` centiseconds per line. The CLI prepends the script header."""
 
-import re
-
 from echora_kara.inference.utils import parse_time_to_hundredths, int2asstime
 
 newnums = [
@@ -53,7 +51,7 @@ def process_norm2assV1(struc, pretime=20, posttime=20):
         if item["type"] == 0 and item["orig"] == "\n":
             try:
                 nowtime = parse_time_to_hundredths(item["start"])
-            except:
+            except Exception:
                 pass
             finally:
                 endtime = nowtime + posttime
@@ -97,14 +95,14 @@ def process_norm2assV2(struc, pretime=20, posttime=20):
             try:
                 starttime = parse_time_to_hundredths(item["start"]) - pretime
                 nowtime = parse_time_to_hundredths(item["start"])
-            except:
+            except Exception:
                 asstxt += item["orig"]
                 i += 1
                 continue
         if item["type"] == 0 and item["orig"] == "\n":
             try:
                 nowtime = parse_time_to_hundredths(item["start"])
-            except:
+            except Exception:
                 pass
             finally:
                 endtime = nowtime + posttime

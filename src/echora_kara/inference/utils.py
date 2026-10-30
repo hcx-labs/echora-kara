@@ -181,7 +181,7 @@ def func_tail_correct_v250611(result_list, tail_mode=1):
                                     post_i += 1
                         if pre_vowel != post_consonant and post_consonant not in ("a", "e", "i", "o", "u"):
                             result_list[i]["pron"] = pre_vowel + "h"
-                except:
+                except Exception:
                     continue
     elif tail_mode == 2:
         for i in range(len(result_list)):
@@ -189,6 +189,6 @@ def func_tail_correct_v250611(result_list, tail_mode=1):
                 try:  # exploit the baseline model's tail behaviour
                     if len(result_list[i - 1]["pron"]) >= 1 and result_list[i - 1]["type"] != 0:
                         result_list[i]["pron"] = result_list[i - 1]["pron"][-1] + "h"
-                except:
+                except Exception:
                     continue
     return result_list

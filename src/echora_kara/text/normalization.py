@@ -12,7 +12,6 @@ import functools
 import os
 import math
 import re
-import sys
 import unicodedata
 from pathlib import Path
 from typing import TypedDict

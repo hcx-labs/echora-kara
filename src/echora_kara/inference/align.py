@@ -3,9 +3,7 @@ the yohane-derived ``engine.aligner.TorchAudioForcedAligner``; times come back a
 
 import torch
 import torchaudio
-import librosa
 import math
-import numpy as np
 import time
 
 
@@ -134,7 +132,6 @@ def align_audio_with_text_torch_yohane(
     from echora_kara.engine.aligner import TorchAudioForcedAligner
 
     start_time = time.time()
-    device = torch.device("cuda" if use_gpu and torch.cuda.is_available() else "cpu")
 
     try:
         if isinstance(audio_file_path, str):

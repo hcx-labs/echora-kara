@@ -43,7 +43,6 @@ import json
 import os
 import random
 import re
-import sys
 import time
 from pathlib import Path
 
@@ -60,7 +59,7 @@ DURATION_BAND_SECONDS = float(os.environ.get("ECHORA_KARA_DURATION_BAND_SECONDS"
 DURATION_ONE_SIDED = (
     float(os.environ["ECHORA_KARA_DURATION_ONE_SIDED"]) if os.environ.get("ECHORA_KARA_DURATION_ONE_SIDED") else None
 )
-from echora_kara.engine.ctc_segmentation import (
+from echora_kara.engine.ctc_segmentation import (  # noqa: E402
     ONSET_CLASSES,
     align_with_duration_model,
     align_with_minimum_durations,
@@ -72,7 +71,6 @@ from echora_kara.engine.ctc_segmentation import (
     vocal_activity,
     with_vocal_activity,
 )
-from torchaudio.functional import TokenSpan  # noqa: E402
 
 PACE, ACTIVITY, LETTER_CAP, GROUP_CAP, PAUSE = 0.9, 2.0, 2, 5, 20  # production decoder constants
 VOWELS = {1, 5, 9, 15, 21, 25}

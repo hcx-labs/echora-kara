@@ -65,7 +65,7 @@ def process_main(result_list, tag_offset=-150, bpm=60, beats_per_bar=3):
                 last_end = None
             else:
                 current_line += item["orig"]
-        elif item["type"] == 0 and item["orig"] == "\n" and "start" not in item:
+        elif item["type"] == 0 and item["orig"] == "\n":
             if "start" in item:
                 current_line += item["start"] + item["orig"]
                 result.append(current_line)
@@ -86,7 +86,7 @@ def process_main(result_list, tag_offset=-150, bpm=60, beats_per_bar=3):
     if last_end:
         current_line += last_end
     result.append(current_line)
-    if item["orig"] != "\n":
+    if result_list and result_list[-1]["orig"] != "\n":
         result.append("\n")
     result.append("\n@Offset=" + str(tag_offset))
     return "".join(result)
@@ -152,7 +152,12 @@ def process_ruby_V2(result_list):
     while i < len(result_list):
         item = result_list[i]
 
-        if item["type"] == 2 and item["orig"] != "":
+        if item["type"] == 2 and item["orig"] != "" and "start" not in item:
+            # A ruby word without a timestamp cannot be annotated: skip it and its reading parts.
+            i += 1
+            while i < len(result_list) and result_list[i]["type"] == 2 and result_list[i]["orig"] == "":
+                i += 1
+        elif item["type"] == 2 and item["orig"] != "":
             ruby1 = item["orig"]
             ruby2 = item["ruby"]
             ruby3 = item["start"]
@@ -226,13 +231,14 @@ def process_rlf(result_list):
             kana_cnt = 1
             kanji_surf = item["orig"]
             struc_str = f"{item['start'][1:-1]}]{item['ruby']}"
-            while result_list[i + 1]["type"] == 2 and result_list[i + 1]["orig"] == "":
+            while i + 1 < len(result_list) and result_list[i + 1]["type"] == 2 and result_list[i + 1]["orig"] == "":
                 i += 1
                 kana_cnt += 1
-                struc_str += f"[{result_list[i]['start'][1:-1]}]{result_list[i]['ruby']}"
+                timing = f"[{result_list[i]['start'][1:-1]}]" if "start" in result_list[i] else ""
+                struc_str += f"{timing}{result_list[i]['ruby']}"
             kana_cnt = 9 if kana_cnt > 9 else kana_cnt
             current_line += "{" + kanji_surf + "|[" + str(kana_cnt) + "|" + struc_str + "}"
-            last_end = result_list[i]["end"]
+            last_end = result_list[i].get("end") or item.get("end")
         elif item["type"] == 0 and "start" in item:
             current_line += f"[10|{item['start'][1:-1]}]{item['orig']}"
             last_end = None
@@ -246,5 +252,5 @@ def process_rlf(result_list):
         i += 1
 
     if current_line and last_end:
-        current_line += last_end
+        current_line += f"[10|{last_end[1:-1]}]"
     return current_line

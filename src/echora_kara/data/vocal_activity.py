@@ -42,9 +42,7 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import subprocess
-import sys
 import time
 from pathlib import Path
 
@@ -376,13 +374,13 @@ def vad(args) -> None:
     else:
         for split in ("train", "validation"):
             path = args.output / f"{split}.jsonl"
-            source = (
+            manifest = (
                 path
                 if path.exists()
                 else (Path(args.manifest_fallback) / f"{split}.jsonl" if args.manifest_fallback else None)
             )
-            if source and source.exists():
-                manifest_ids += [json.loads(line)["id"] for line in source.open() if line.strip()]
+            if manifest and manifest.exists():
+                manifest_ids += [json.loads(line)["id"] for line in manifest.open() if line.strip()]
     # Never overwrite an existing array (a stem_energy array is the more trusted source) unless --force.
     suffix = ".npz" if args.activity_dir else ".npy"
     todo = [isrc for isrc in dict.fromkeys(manifest_ids) if args.force or not (target / f"{isrc}{suffix}").exists()]

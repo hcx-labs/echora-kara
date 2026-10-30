@@ -15,7 +15,6 @@ import multiprocessing as mp
 import os
 import random
 import subprocess
-import sys
 from dataclasses import dataclass
 from typing import Optional
 from functools import partial
@@ -2427,16 +2426,17 @@ def main():
         config.edge_head = True
     if args.background_head_weight > 0:
         config.background_head = True
+    # The --model checkpoint's own config: its text head version and its LoRA adapters (--fusion-lora-grow).
+    init_config = (
+        json.loads((Path(args.model) / "config.json").read_text())
+        if (Path(args.model) / "config.json").exists()
+        else {}
+    )
     text_head = args.text_aligner_weight > 0
     if text_head:
         version = args.song_text_version
         # A head carried over from --model keeps the text version it was trained with;
         # only a NEW head must use the current version.
-        init_config = (
-            json.loads((Path(args.model) / "config.json").read_text())
-            if (Path(args.model) / "config.json").exists()
-            else {}
-        )
         carried = init_config.get("text_aligner") is not None and init_config.get("song_text_version", 1) == version
         if (
             not args.resume

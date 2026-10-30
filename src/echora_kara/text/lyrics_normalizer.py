@@ -11,8 +11,6 @@ import nltk
 from nltk.corpus import cmudict
 import pykakasi
 import pyphen
-import pypinyin
-from pypinyin import pinyin, Style
 from uroman import Uroman
 import re
 import unicodedata
@@ -700,7 +698,7 @@ def _legacy_process_haruhi_line(line, lang="jaen", sokuon_split=False, hatsuon_s
                 if result[i].get("type") != 0 and ruby_now and ruby_now[-1] in ("っ", "ッ"):
                     try:
                         pron = postpron[0]
-                    except:
+                    except Exception:
                         pron = "h"  # tail_pron
                     else:
                         if pron == "c":
@@ -726,7 +724,7 @@ def _legacy_process_haruhi_line(line, lang="jaen", sokuon_split=False, hatsuon_s
                         result[i]["pron"] = "wa"
                     elif result[i]["orig"] == "へ" and line_roma_proc[i] == "e":
                         result[i]["pron"] = "e"
-                except:
+                except Exception:
                     print("Ignored errors when trying to correct ha and he...")
     elif lang == "ko":
         for char in line:

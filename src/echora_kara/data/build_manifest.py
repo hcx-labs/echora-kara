@@ -448,11 +448,11 @@ class Components:
                 self.parent[max(a, b)] = min(a, b)
 
 
-def split_hash(component: str, seed: str) -> str:
-    """Deterministic split of an artist component: "validation" for ``VALIDATION_SHARE`` of the sha256 buckets of
+def split_hash(component: str, seed: str, share: float = VALIDATION_SHARE) -> str:
+    """Deterministic split of an artist component: "validation" for ``share`` of the sha256 buckets of
     ``seed:component``, else "train"."""
     value = int(hashlib.sha256(f"{seed}:{component}".encode()).hexdigest()[:12], 16) % 10000
-    return "validation" if value < VALIDATION_SHARE * 10000 else "train"
+    return "validation" if value < share * 10000 else "train"
 
 
 # ---------------------------------------------------------------------------------------------
@@ -1256,7 +1256,7 @@ def main() -> None:
     def evaluate(seed: int) -> float:
         size, dropped, per_language = 0, 0, Counter()
         for component, isrcs in by_component.items():
-            split = fixed.get(component) or split_hash(component, f"{args.seed}:{seed}")
+            split = fixed.get(component) or split_hash(component, f"{args.seed}:{seed}", args.validation_share)
             if split != "validation":
                 continue
             for isrc in isrcs:
@@ -1276,7 +1276,7 @@ def main() -> None:
     else:
         seed = min(range(max(1, args.search_seeds)), key=evaluate) if pending else 0
     for component in pending:
-        fixed[component] = split_hash(component, f"{args.seed}:{seed}")
+        fixed[component] = split_hash(component, f"{args.seed}:{seed}", args.validation_share)
     for component, isrcs in by_component.items():
         split = fixed[component]
         for isrc in isrcs:

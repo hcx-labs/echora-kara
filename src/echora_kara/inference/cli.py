@@ -361,7 +361,6 @@ def main(argv=None):
             check=True,
         )
         audio_channels, sr = sf.read(decoded_audio_path, dtype="float32", always_2d=True)
-    input_sr = sr
     audio_file = audio_channels.mean(axis=1)
     non_silent_ranges = (
         non_silent_recog(audio_file, sr, silent_window_s, tail_thres_pct, tail_thres_ratio) if head_correct else []
@@ -490,7 +489,6 @@ def main(argv=None):
             "inference_passes": max(
                 (int(result.get("inference_passes", 1)) for result in alignment_results), default=0
             ),
-            "line_count": len(canonical_lines),
             "token_count": len(finite_scores),
             "mean_ctc_score": sum(finite_scores) / len(finite_scores) if finite_scores else 0.0,
             "minimum_ctc_score": min(finite_scores) if finite_scores else 0.0,
@@ -506,9 +504,7 @@ def main(argv=None):
             else None,
             "max_blank_hold_seconds": float(os.environ.get("ECHORA_KARA_MAX_BLANK_HOLD_SECONDS", "0.2")),
             "model_path": hf_model_path or "torchaudio.pipelines.MMS_FA",
-            "device": "cuda"
-            if (align_use_gpu or not hf_model_path) and __import__("torch").cuda.is_available()
-            else "cpu",
+            "device": "cuda" if align_use_gpu and __import__("torch").cuda.is_available() else "cpu",
             "normalization_language": lrc_language,
             "audio_source": "input_audio",
             "inference_config": vars(args),

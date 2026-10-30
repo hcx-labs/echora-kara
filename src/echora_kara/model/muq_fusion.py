@@ -312,7 +312,6 @@ class MuQBranch:
         mono waveforms (B x L, zero-padded; ``lengths_16k`` marks the valid samples). The
         aligner path always passes 16 kHz audio; ``sample_rate`` exists for the layer probe's
         native-24 kHz comparison only."""
-        import torchaudio
 
         waveform_16k = waveform_16k.to(self.device, torch.float32)
         if waveform_16k.dim() == 1:

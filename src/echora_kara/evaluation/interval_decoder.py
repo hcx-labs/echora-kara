@@ -18,7 +18,6 @@ usage: python -m echora_kara.evaluation.interval_decoder --songs 80 --out overla
 
 import argparse
 import json
-import math
 import random
 import re
 import subprocess
