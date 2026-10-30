@@ -1,3 +1,6 @@
+"""Command-line aligner: normalize a lyrics file, align it to the song's audio and write the alignment JSON plus the
+LRC/ASS karaoke files. Also driven in-process by ``inference.worker``."""
+
 import argparse
 import json
 import os
@@ -18,6 +21,8 @@ from echora_kara.inference.utils import split_long_segments, non_silent_head_adj
 
 
 def file_identity(path):
+    """Provenance record of a file, or of a model directory's inference files (weights, configs, tokenizer; never
+    trainer state): ``{"path": absolute path, "sha256": {file name or relative path: hex digest}}``."""
     import hashlib
     from pathlib import Path
 
@@ -34,11 +39,7 @@ def file_identity(path):
         "special_tokens_map.json",
         "added_tokens.json",
     )
-    files = (
-        sorted({p for pattern in patterns for p in path.glob(pattern) if p.is_file()})
-        if path.is_dir()
-        else [path]
-    )
+    files = sorted({p for pattern in patterns for p in path.glob(pattern) if p.is_file()}) if path.is_dir() else [path]
     hashes = {}
     for file in files:
         digest = hashlib.sha256()
@@ -91,6 +92,15 @@ def source_diagnostic_indexes(value, indexes, key=""):
 
 
 def main(argv=None):
+    """Align a lyrics file to a song's audio and write the karaoke outputs.
+
+    Reads the lyrics (``-it``, in hrh, uta or moe format) and the audio (``-ia``, else i.wav or i.mp3; anything
+    libsndfile cannot read is first decoded by ffmpeg to decoded.wav beside it) from ``--path_io``, normalizes each
+    line into acoustic tokens with the chosen label rules, and aligns them: MMS_FA per token by default, or one
+    global CTC pass over the song with a Hugging Face checkpoint (``-hf`` / ``--model yohane``). Writes
+    o.alignment.json (per-line and per-token millisecond timings in source coordinates plus diagnostics and file
+    identities), then applies head/tail correction and writes o_ruby.lrc, o_rlf.lrc and o.ass to the same directory.
+    ``argv`` defaults to the process arguments."""
     start_time = time.time()
     script_dir = os.path.dirname(os.path.realpath(__file__))
     parser = argparse.ArgumentParser(description="Align lyrics to a song's audio")
@@ -111,7 +121,11 @@ def main(argv=None):
     parser.add_argument("-it", "--input_text", default="i.txt", help="Input lyrics file name")
     parser.add_argument("-t", "--tail_correct", type=int, default=-999, help="Line-tail extension mode")
     parser.add_argument(
-        "-tl", "--tail_limit_window", type=float, default=0.8, help="Window length of the whole-song silence detection, in seconds"
+        "-tl",
+        "--tail_limit_window",
+        type=float,
+        default=0.8,
+        help="Window length of the whole-song silence detection, in seconds",
     )
     parser.add_argument(
         "-tp",
@@ -145,11 +159,13 @@ def main(argv=None):
     )
     parser.add_argument("-f", "--txt_format", default="hrh", help="Lyrics text format (hrh, uta, moe)")
     parser.add_argument(
-        "-cl", "--characters_per_line", type=int, default=0, help="Maximum characters per line in the output files (0: no limit)"
+        "-cl",
+        "--characters_per_line",
+        type=int,
+        default=0,
+        help="Maximum characters per line in the output files (0: no limit)",
     )
-    parser.add_argument(
-        "--no-gpu", action="store_false", dest="use_gpu", default=True, help="Disable GPU acceleration"
-    )
+    parser.add_argument("--no-gpu", action="store_false", dest="use_gpu", default=True, help="Disable GPU acceleration")
     parser.add_argument(
         "-m",
         "--model",
@@ -161,12 +177,8 @@ def main(argv=None):
     parser.add_argument("-hf", "--hf_model_path", default=None, help="Hugging Face model ID or local path")
     parser.add_argument("--head_correct", type=int, default=-999, help="Run silence detection to adjust line heads")
     parser.add_argument("--min_letter_ms", type=int, default=0, help="Minimum duration per letter")
-    parser.add_argument(
-        "--min_token_ms", type=int, default=0, help="Minimum duration per acoustic token"
-    )
-    parser.add_argument(
-        "--timing_offset_ms", type=int, default=0, help="Shift every token time (calibration)"
-    )
+    parser.add_argument("--min_token_ms", type=int, default=0, help="Minimum duration per acoustic token")
+    parser.add_argument("--timing_offset_ms", type=int, default=0, help="Shift every token time (calibration)")
     parser.add_argument(
         "--vocal_activity_weight",
         type=float,
@@ -352,9 +364,7 @@ def main(argv=None):
     input_sr = sr
     audio_file = audio_channels.mean(axis=1)
     non_silent_ranges = (
-        non_silent_recog(audio_file, sr, silent_window_s, tail_thres_pct, tail_thres_ratio)
-        if head_correct
-        else []
+        non_silent_recog(audio_file, sr, silent_window_s, tail_thres_pct, tail_thres_ratio) if head_correct else []
     )
 
     def get_align_function(model_name):
@@ -414,9 +424,7 @@ def main(argv=None):
         )
 
     if len(alignment_results) != len(alignment_tokens):
-        raise RuntimeError(
-            f"Alignment returned {len(alignment_results)} tokens for {len(alignment_tokens)} inputs"
-        )
+        raise RuntimeError(f"Alignment returned {len(alignment_results)} tokens for {len(alignment_tokens)} inputs")
     for i, result in enumerate(alignment_results):
         original_index = token_to_index_map[i]
         result_list[original_index]["start"] = result["start"]
@@ -441,26 +449,19 @@ def main(argv=None):
                     "end_ms": round(float(original_item["alignment_end"]) * 1000),
                     "acoustic_start_ms": round(
                         float(
-                            alignment_results[alignment_index].get(
-                                "acoustic_start", original_item["alignment_start"]
-                            )
+                            alignment_results[alignment_index].get("acoustic_start", original_item["alignment_start"])
                         )
                         * 1000
                     ),
                     "acoustic_end_ms": round(
-                        float(
-                            alignment_results[alignment_index].get(
-                                "acoustic_end", original_item["alignment_end"]
-                            )
-                        )
+                        float(alignment_results[alignment_index].get("acoustic_end", original_item["alignment_end"]))
                         * 1000
                     ),
                     "ctc_score": float(original_item["alignment_score"]),
                 }
             )
         line_is_background = any(
-            alignment_results[token_offset + i].get("voice") == "background"
-            for i in range(len(line_tokens))
+            alignment_results[token_offset + i].get("voice") == "background" for i in range(len(line_tokens))
         )
         token_offset += len(line_tokens)
         canonical_lines.append(
@@ -478,9 +479,7 @@ def main(argv=None):
             }
         )
     finite_scores = [token["ctc_score"] for line in canonical_lines for token in line["tokens"]]
-    source_diagnostics = (
-        alignment_results[0].get("source_diagnostics", {}) if alignment_results else {}
-    )
+    source_diagnostics = alignment_results[0].get("source_diagnostics", {}) if alignment_results else {}
     source_diagnostics = source_diagnostic_indexes(
         source_diagnostics, [i for i, tokens in enumerate(alignment_token_lines) if tokens]
     )
@@ -497,9 +496,7 @@ def main(argv=None):
             "minimum_ctc_score": min(finite_scores) if finite_scores else 0.0,
             **source_diagnostics,
             "line_count": len(canonical_lines),
-            "acoustic_line_source_indexes": [
-                i for i, tokens in enumerate(alignment_token_lines) if tokens
-            ],
+            "acoustic_line_source_indexes": [i for i, tokens in enumerate(alignment_token_lines) if tokens],
             "normalizer_identity": file_identity(hn.__file__),
             "label_rules": args.label_rules,
             "source_identity": file_identity(input_text_path),
@@ -507,9 +504,7 @@ def main(argv=None):
             "checkpoint_identity": file_identity(hf_model_path)
             if hf_model_path and os.path.exists(hf_model_path)
             else None,
-            "max_blank_hold_seconds": float(
-                os.environ.get("ECHORA_KARA_MAX_BLANK_HOLD_SECONDS", "0.2")
-            ),
+            "max_blank_hold_seconds": float(os.environ.get("ECHORA_KARA_MAX_BLANK_HOLD_SECONDS", "0.2")),
             "model_path": hf_model_path or "torchaudio.pipelines.MMS_FA",
             "device": "cuda"
             if (align_use_gpu or not hf_model_path) and __import__("torch").cuda.is_available()
@@ -525,9 +520,7 @@ def main(argv=None):
     result_list = non_silent_head_adjust(result_list, non_silent_ranges)
 
     if tail_correct == 3:
-        result_list = func_tail_correct_v250615(
-            result_list, audio_file, sr, tail_thres_pct, tail_thres_ratio
-        )
+        result_list = func_tail_correct_v250615(result_list, audio_file, sr, tail_thres_pct, tail_thres_ratio)
 
     if output_characters_per_line > 0:
         split_long_segments(result_list, max_length=output_characters_per_line)

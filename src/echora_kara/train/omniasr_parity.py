@@ -19,6 +19,7 @@ usage: python -m echora_kara.train.omniasr_parity --official omniASR-CTC-1B-v2.p
     --converted omniasr-ctc-1b-v2-full --community omniasr-ctc-1b-v2-hf \
     --audio <vocal stem>.npy [--seconds 20]
 """
+
 from __future__ import annotations
 
 import argparse
@@ -48,6 +49,7 @@ def community_key(key: str) -> str:
 
 
 def load_converted(directory: Path) -> dict[str, torch.Tensor]:
+    """All tensors of the ``*.safetensors`` files in a converted model directory."""
     out = {}
     for file in sorted(directory.glob("*.safetensors")):
         with safe_open(str(file), "pt") as handle:
@@ -57,6 +59,9 @@ def load_converted(directory: Path) -> dict[str, torch.Tensor]:
 
 
 def tensor_parity(official: dict, converted: dict, community: Path | None) -> None:
+    """Check 1: assert every official tensor equals its converted counterpart exactly, then cross-check against the
+    community conversion when its ``model.safetensors`` is present (positional-conv weight norm recomposed).
+    """
     worst = 0.0
     for key, tensor in official.items():
         ours = converted[rename(key)]
@@ -78,13 +83,16 @@ def tensor_parity(official: dict, converted: dict, community: Path | None) -> No
                 continue
             if target not in converted or converted[target].shape != tensor.shape:
                 continue
-            worst = max(worst, float((converted[target].float() - tensor.float()).abs().max())); compared += 1
+            worst = max(worst, float((converted[target].float() - tensor.float()).abs().max()))
+            compared += 1
     if merged is not None:
         g = converted["wav2vec2.encoder.pos_conv_embed.conv.parametrizations.weight.original0"].float()
         v = converted["wav2vec2.encoder.pos_conv_embed.conv.parametrizations.weight.original1"].float()
         recomposed = g * v / v.norm(dim=(0, 1), keepdim=True)
         worst_pos = float((recomposed - merged.float()).abs().max())
-        print(f"community cross-check: {compared} tensors max |diff| {worst:.3e}; pos-conv recomposed max |diff| {worst_pos:.3e}")
+        print(
+            f"community cross-check: {compared} tensors max |diff| {worst:.3e}; pos-conv recomposed max |diff| {worst_pos:.3e}"
+        )
         assert worst_pos < 1e-5, "positional conv differs from the community conversion"
     else:
         print(f"community cross-check: {compared} tensors max |diff| {worst:.3e}")
@@ -92,6 +100,7 @@ def tensor_parity(official: dict, converted: dict, community: Path | None) -> No
 
 
 def build_fairseq2(official: dict, device):
+    """The official fairseq2 ASR model with ``official`` loaded strictly, in eval mode on ``device``."""
     from fairseq2.models.transformer import TransformerNormOrder
     from fairseq2.models.wav2vec2 import Wav2Vec2EncoderConfig
     from fairseq2.models.wav2vec2.asr import Wav2Vec2AsrConfig, create_wav2vec2_asr_model
@@ -99,19 +108,44 @@ def build_fairseq2(official: dict, device):
     # omnilingual-asr large_lv60k encoder layout; sizes read from the checkpoint
     # ("1b_v2": 48 x 1280, FFN 5120; "300m_v2": 24 x 1024, FFN 4096), vocab 10288.
     import re
+
     layers = {int(m.group(1)) for key in official if (m := re.search(r"encoder\.layers\.(\d+)\.", key))}
     model_dim = next(t for k, t in official.items() if k.endswith("final_proj.weight")).shape[1]
     ffn_dim = next(t for k, t in official.items() if re.search(r"layers\.0\.ffn\.inner_proj\.weight$", k)).shape[0]
     print(f"fairseq2 encoder: {len(layers)} x {model_dim}, FFN {ffn_dim}")
     encoder = Wav2Vec2EncoderConfig(
-        model_dim=model_dim, max_seq_len=4096, feature_dim=512, use_fbank=False, first_pass_dropout_p=0.0,
+        model_dim=model_dim,
+        max_seq_len=4096,
+        feature_dim=512,
+        use_fbank=False,
+        first_pass_dropout_p=0.0,
         layer_norm_features=False,
-        feature_extractor_layer_descs=[(512, 10, 5), (512, 3, 2), (512, 3, 2), (512, 3, 2), (512, 3, 2), (512, 2, 2), (512, 2, 2)],
-        feature_extractor_bias=True, feature_extractor_layer_norm_convs=True, feature_grad_scale=1.0,
-        pos_encoder_type="conv", pos_encoder_depth=1, pos_conv_kernel_size=128, num_pos_conv_groups=16,
-        use_conformer=False, num_encoder_layers=len(layers), num_encoder_attn_heads=16, ffn_inner_dim=ffn_dim,
-        dropout_p=0.0, attn_dropout_p=0.0, ffn_inner_dropout_p=0.1, layer_drop_p=0.1,
-        norm_order=TransformerNormOrder.PRE)
+        feature_extractor_layer_descs=[
+            (512, 10, 5),
+            (512, 3, 2),
+            (512, 3, 2),
+            (512, 3, 2),
+            (512, 3, 2),
+            (512, 2, 2),
+            (512, 2, 2),
+        ],
+        feature_extractor_bias=True,
+        feature_extractor_layer_norm_convs=True,
+        feature_grad_scale=1.0,
+        pos_encoder_type="conv",
+        pos_encoder_depth=1,
+        pos_conv_kernel_size=128,
+        num_pos_conv_groups=16,
+        use_conformer=False,
+        num_encoder_layers=len(layers),
+        num_encoder_attn_heads=16,
+        ffn_inner_dim=ffn_dim,
+        dropout_p=0.0,
+        attn_dropout_p=0.0,
+        ffn_inner_dropout_p=0.1,
+        layer_drop_p=0.1,
+        norm_order=TransformerNormOrder.PRE,
+    )
     config = Wav2Vec2AsrConfig(encoder_config=encoder, target_vocab_size=10288, final_dropout_p=0.0, use_masking=False)
     model = create_wav2vec2_asr_model(config)
     missing, unexpected = model.load_state_dict(official, strict=False)
@@ -124,16 +158,21 @@ def fairseq2_logits(model, seqs: torch.Tensor) -> torch.Tensor:
     """Call the fairseq2 ASR model across its API generations."""
     try:
         from fairseq2.nn import BatchLayout
+
         output = model(seqs, BatchLayout.of(seqs))
     except ImportError:
         from fairseq2.nn.padding import PaddingMask  # fairseq2 <= 0.4
         from fairseq2.models.sequence import SequenceBatch
-        output = model(SequenceBatch(seqs, PaddingMask(torch.tensor([seqs.shape[1]], device=seqs.device), seqs.shape[1])))
+
+        output = model(
+            SequenceBatch(seqs, PaddingMask(torch.tensor([seqs.shape[1]], device=seqs.device), seqs.shape[1]))
+        )
     logits = output.logits if hasattr(output, "logits") else output[0]
     return logits.float()
 
 
 def greedy(log_probs: torch.Tensor, blank: int) -> list[int]:
+    """Greedy CTC decode of ``[T, V]`` log-probs: frame argmax with repeats collapsed and blanks removed."""
     ids, out, prev = log_probs.argmax(-1).tolist(), [], None
     for i in ids:
         if i != blank and i != prev:
@@ -143,6 +182,7 @@ def greedy(log_probs: torch.Tensor, blank: int) -> list[int]:
 
 
 def main() -> int:
+    """Run the three parity checks; return 0 when all pass, 2 when fairseq2 is unavailable (failures assert)."""
     parser = argparse.ArgumentParser()
     parser.add_argument("--official", type=Path, required=True)
     parser.add_argument("--converted", type=Path, required=True, help="full-vocab conversion directory")
@@ -168,7 +208,9 @@ def main() -> int:
     pieces = None
     if args.tokenizer_json and args.tokenizer_json.exists():
         vocab = json.loads(args.tokenizer_json.read_text())["model"]["vocab"]
-        pieces = {i: p for p, i in (vocab.items() if isinstance(vocab, dict) else ((p, i) for i, (p, _) in enumerate(vocab)))}
+        pieces = {
+            i: p for p, i in (vocab.items() if isinstance(vocab, dict) else ((p, i) for i, (p, _) in enumerate(vocab)))
+        }
     hf_ids = greedy(hf_lp, blank)
     if pieces:
         print("HF greedy:", "".join(pieces.get(i, "?") for i in hf_ids)[:200])
@@ -180,10 +222,14 @@ def main() -> int:
     reference = build_fairseq2(official, device)
     ref_logits = fairseq2_logits(reference, x)
     frames = min(ref_logits.shape[1], hf_logits.shape[1])
-    assert ref_logits.shape[1] == hf_logits.shape[1], f"frame counts differ: fairseq2 {ref_logits.shape[1]} vs HF {hf_logits.shape[1]}"
+    assert ref_logits.shape[1] == hf_logits.shape[1], (
+        f"frame counts differ: fairseq2 {ref_logits.shape[1]} vs HF {hf_logits.shape[1]}"
+    )
     ref_lp = torch.log_softmax(ref_logits, -1)[0, :frames]
     delta = (ref_lp - hf_lp[:frames]).abs()
-    print(f"emission parity: frames {frames}, max |delta log-softmax| {float(delta.max()):.3e}, mean {float(delta.mean()):.3e}")
+    print(
+        f"emission parity: frames {frames}, max |delta log-softmax| {float(delta.max()):.3e}, mean {float(delta.mean()):.3e}"
+    )
     ref_ids = greedy(ref_lp, blank)
     same_argmax = float((ref_lp.argmax(-1) == hf_lp[:frames].argmax(-1)).float().mean())
     print(f"decode parity: frame argmax agreement {same_argmax:.5f}; greedy ids equal: {ref_ids == hf_ids}")

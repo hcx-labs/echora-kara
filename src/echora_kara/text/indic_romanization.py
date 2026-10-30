@@ -17,34 +17,162 @@ Tamil stops are never voiced (காதலின் → kaatalin). v2 reads the 
 
 Every function returns a-z labels only; an unmapped character yields '' so the caller masks it.
 """
+
 from __future__ import annotations
 
 VERSION = "indic_v2"
 
 _DEVANAGARI_VOWELS = {
-    "अ": "a", "आ": "aa", "इ": "i", "ई": "ii", "उ": "u", "ऊ": "uu", "ऋ": "ri", "ॠ": "rii", "ऌ": "li",
-    "ए": "e", "ऐ": "ai", "ओ": "o", "औ": "au", "ऑ": "o", "ऍ": "e", "ऎ": "e", "ऒ": "o", "ॲ": "a",
+    "अ": "a",
+    "आ": "aa",
+    "इ": "i",
+    "ई": "ii",
+    "उ": "u",
+    "ऊ": "uu",
+    "ऋ": "ri",
+    "ॠ": "rii",
+    "ऌ": "li",
+    "ए": "e",
+    "ऐ": "ai",
+    "ओ": "o",
+    "औ": "au",
+    "ऑ": "o",
+    "ऍ": "e",
+    "ऎ": "e",
+    "ऒ": "o",
+    "ॲ": "a",
 }
 _DEVANAGARI_SIGNS = {
-    "ा": "aa", "ि": "i", "ी": "ii", "ु": "u", "ू": "uu", "ृ": "ri", "ॄ": "rii", "े": "e", "ै": "ai",
-    "ो": "o", "ौ": "au", "ॉ": "o", "ॅ": "e", "ॆ": "e", "ॊ": "o", "ॢ": "li",
+    "ा": "aa",
+    "ि": "i",
+    "ी": "ii",
+    "ु": "u",
+    "ू": "uu",
+    "ृ": "ri",
+    "ॄ": "rii",
+    "े": "e",
+    "ै": "ai",
+    "ो": "o",
+    "ौ": "au",
+    "ॉ": "o",
+    "ॅ": "e",
+    "ॆ": "e",
+    "ॊ": "o",
+    "ॢ": "li",
 }
 _DEVANAGARI_CONSONANTS = {
-    "क": "k", "ख": "kh", "ग": "g", "घ": "gh", "ङ": "ng", "च": "ch", "छ": "chh", "ज": "j", "झ": "jh", "ञ": "ny",
-    "ट": "t", "ठ": "th", "ड": "d", "ढ": "dh", "ण": "n", "त": "t", "थ": "th", "द": "d", "ध": "dh", "न": "n",
-    "प": "p", "फ": "ph", "ब": "b", "भ": "bh", "म": "m", "य": "y", "र": "r", "ल": "l", "व": "v", "श": "sh",
-    "ष": "sh", "स": "s", "ह": "h", "ळ": "l", "क़": "k", "ख़": "kh", "ग़": "g", "ज़": "z", "ड़": "r", "ढ़": "rh",
-    "फ़": "f", "य़": "y", "ऱ": "r", "ऩ": "n", "ॹ": "z", "ॸ": "d",
+    "क": "k",
+    "ख": "kh",
+    "ग": "g",
+    "घ": "gh",
+    "ङ": "ng",
+    "च": "ch",
+    "छ": "chh",
+    "ज": "j",
+    "झ": "jh",
+    "ञ": "ny",
+    "ट": "t",
+    "ठ": "th",
+    "ड": "d",
+    "ढ": "dh",
+    "ण": "n",
+    "त": "t",
+    "थ": "th",
+    "द": "d",
+    "ध": "dh",
+    "न": "n",
+    "प": "p",
+    "फ": "ph",
+    "ब": "b",
+    "भ": "bh",
+    "म": "m",
+    "य": "y",
+    "र": "r",
+    "ल": "l",
+    "व": "v",
+    "श": "sh",
+    "ष": "sh",
+    "स": "s",
+    "ह": "h",
+    "ळ": "l",
+    "क़": "k",
+    "ख़": "kh",
+    "ग़": "g",
+    "ज़": "z",
+    "ड़": "r",
+    "ढ़": "rh",
+    "फ़": "f",
+    "य़": "y",
+    "ऱ": "r",
+    "ऩ": "n",
+    "ॹ": "z",
+    "ॸ": "d",
 }
-_DEVANAGARI_NUKTA = {"क": "k", "ख": "kh", "ग": "g", "ज": "z", "ड": "r", "ढ": "rh", "फ": "f", "य": "y", "न": "n", "र": "r"}
+_DEVANAGARI_NUKTA = {
+    "क": "k",
+    "ख": "kh",
+    "ग": "g",
+    "ज": "z",
+    "ड": "r",
+    "ढ": "rh",
+    "फ": "f",
+    "य": "y",
+    "न": "n",
+    "र": "r",
+}
 
-_GURMUKHI_VOWELS = {"ਅ": "a", "ਆ": "aa", "ਇ": "i", "ਈ": "ii", "ਉ": "u", "ਊ": "uu", "ਏ": "e", "ਐ": "ai", "ਓ": "o", "ਔ": "au"}
+_GURMUKHI_VOWELS = {
+    "ਅ": "a",
+    "ਆ": "aa",
+    "ਇ": "i",
+    "ਈ": "ii",
+    "ਉ": "u",
+    "ਊ": "uu",
+    "ਏ": "e",
+    "ਐ": "ai",
+    "ਓ": "o",
+    "ਔ": "au",
+}
 _GURMUKHI_SIGNS = {"ਾ": "aa", "ਿ": "i", "ੀ": "ii", "ੁ": "u", "ੂ": "uu", "ੇ": "e", "ੈ": "ai", "ੋ": "o", "ੌ": "au"}
 _GURMUKHI_CONSONANTS = {
-    "ਸ": "s", "ਹ": "h", "ਕ": "k", "ਖ": "kh", "ਗ": "g", "ਘ": "gh", "ਙ": "ng", "ਚ": "ch", "ਛ": "chh", "ਜ": "j",
-    "ਝ": "jh", "ਞ": "ny", "ਟ": "t", "ਠ": "th", "ਡ": "d", "ਢ": "dh", "ਣ": "n", "ਤ": "t", "ਥ": "th", "ਦ": "d",
-    "ਧ": "dh", "ਨ": "n", "ਪ": "p", "ਫ": "ph", "ਬ": "b", "ਭ": "bh", "ਮ": "m", "ਯ": "y", "ਰ": "r", "ਲ": "l",
-    "ਵ": "v", "ੜ": "r", "ਸ਼": "sh", "ਖ਼": "kh", "ਗ਼": "g", "ਜ਼": "z", "ਫ਼": "f", "ਲ਼": "l",
+    "ਸ": "s",
+    "ਹ": "h",
+    "ਕ": "k",
+    "ਖ": "kh",
+    "ਗ": "g",
+    "ਘ": "gh",
+    "ਙ": "ng",
+    "ਚ": "ch",
+    "ਛ": "chh",
+    "ਜ": "j",
+    "ਝ": "jh",
+    "ਞ": "ny",
+    "ਟ": "t",
+    "ਠ": "th",
+    "ਡ": "d",
+    "ਢ": "dh",
+    "ਣ": "n",
+    "ਤ": "t",
+    "ਥ": "th",
+    "ਦ": "d",
+    "ਧ": "dh",
+    "ਨ": "n",
+    "ਪ": "p",
+    "ਫ": "ph",
+    "ਬ": "b",
+    "ਭ": "bh",
+    "ਮ": "m",
+    "ਯ": "y",
+    "ਰ": "r",
+    "ਲ": "l",
+    "ਵ": "v",
+    "ੜ": "r",
+    "ਸ਼": "sh",
+    "ਖ਼": "kh",
+    "ਗ਼": "g",
+    "ਜ਼": "z",
+    "ਫ਼": "f",
+    "ਲ਼": "l",
 }
 _GURMUKHI_NUKTA = {"ਸ": "sh", "ਖ": "kh", "ਗ": "g", "ਜ": "z", "ਫ": "f", "ਲ": "l"}
 
@@ -59,8 +187,19 @@ def _nasal_for(next_label: str | None) -> str:
     return "n"
 
 
-def _brahmic_units(text: str, vowels: dict, signs: dict, consonants: dict, nukta_map: dict,
-                   virama: str, anusvara: set, candrabindu: set, visarga: str, nukta: str, addak: str) -> list[dict] | None:
+def _brahmic_units(
+    text: str,
+    vowels: dict,
+    signs: dict,
+    consonants: dict,
+    nukta_map: dict,
+    virama: str,
+    anusvara: set,
+    candrabindu: set,
+    visarga: str,
+    nukta: str,
+    addak: str,
+) -> list[dict] | None:
     """Syllable units [{consonant, vowel, explicit, nasal, geminate}] in order; None if unmapped."""
     units: list[dict] = []
     geminate_next = False
@@ -141,8 +280,11 @@ def _render(units: list[dict]) -> str:
         out.append(consonant)
         out.append(unit["vowel"])
         if unit["nasal"]:
-            following = next((u["consonant"] for u in units[index + 1:] if u["consonant"]), None) \
-                if index + 1 < len(units) else None
+            following = (
+                next((u["consonant"] for u in units[index + 1 :] if u["consonant"]), None)
+                if index + 1 < len(units)
+                else None
+            )
             out.append(_nasal_for(following))
         if unit.get("visarga"):
             out.append("h")
@@ -150,8 +292,20 @@ def _render(units: list[dict]) -> str:
 
 
 def devanagari_label(text: str) -> str:
-    units = _brahmic_units(text, _DEVANAGARI_VOWELS, _DEVANAGARI_SIGNS, _DEVANAGARI_CONSONANTS, _DEVANAGARI_NUKTA,
-                           virama="्", anusvara={"ं"}, candrabindu={"ँ"}, visarga="ः", nukta="़", addak="")
+    """Pronunciation label of a Devanagari word (module docstring); '' when a character is not mapped."""
+    units = _brahmic_units(
+        text,
+        _DEVANAGARI_VOWELS,
+        _DEVANAGARI_SIGNS,
+        _DEVANAGARI_CONSONANTS,
+        _DEVANAGARI_NUKTA,
+        virama="्",
+        anusvara={"ं"},
+        candrabindu={"ँ"},
+        visarga="ः",
+        nukta="़",
+        addak="",
+    )
     if units is None:
         return ""
     _schwa_deletion(units, nasal_blocks=True)
@@ -159,8 +313,20 @@ def devanagari_label(text: str) -> str:
 
 
 def gurmukhi_label(text: str) -> str:
-    units = _brahmic_units(text, _GURMUKHI_VOWELS, _GURMUKHI_SIGNS, _GURMUKHI_CONSONANTS, _GURMUKHI_NUKTA,
-                           virama="੍", anusvara={"ਂ", "ੰ"}, candrabindu=set(), visarga="ਃ", nukta="਼", addak="ੱ")
+    """Pronunciation label of a Gurmukhi word (module docstring); '' when a character is not mapped."""
+    units = _brahmic_units(
+        text,
+        _GURMUKHI_VOWELS,
+        _GURMUKHI_SIGNS,
+        _GURMUKHI_CONSONANTS,
+        _GURMUKHI_NUKTA,
+        virama="੍",
+        anusvara={"ਂ", "ੰ"},
+        candrabindu=set(),
+        visarga="ਃ",
+        nukta="਼",
+        addak="ੱ",
+    )
     if units is None:
         return ""
     _schwa_deletion(units, nasal_blocks=False)
@@ -170,21 +336,73 @@ def gurmukhi_label(text: str) -> str:
 # ---------------------------------------------------------------------------------------------
 # Tamil
 
-_TAMIL_VOWELS = {"அ": "a", "ஆ": "aa", "இ": "i", "ஈ": "ii", "உ": "u", "ஊ": "uu", "எ": "e", "ஏ": "ee",
-                 "ஐ": "ai", "ஒ": "o", "ஓ": "oo", "ஔ": "au"}
-_TAMIL_SIGNS = {"ா": "aa", "ி": "i", "ீ": "ii", "ு": "u", "ூ": "uu", "ெ": "e", "ே": "ee", "ை": "ai",
-                "ொ": "o", "ோ": "oo", "ௌ": "au"}
-_TAMIL_CONSONANTS = {"க": "k", "ங": "ng", "ச": "s", "ஞ": "ny", "ட": "t", "ண": "n", "த": "th", "ந": "n", "ப": "p",
-                     "ம": "m", "ய": "y", "ர": "r", "ல": "l", "வ": "v", "ழ": "l", "ள": "l", "ற": "r", "ன": "n",
-                     "ஜ": "j", "ஷ": "sh", "ஸ": "s", "ஹ": "h"}
+_TAMIL_VOWELS = {
+    "அ": "a",
+    "ஆ": "aa",
+    "இ": "i",
+    "ஈ": "ii",
+    "உ": "u",
+    "ஊ": "uu",
+    "எ": "e",
+    "ஏ": "ee",
+    "ஐ": "ai",
+    "ஒ": "o",
+    "ஓ": "oo",
+    "ஔ": "au",
+}
+_TAMIL_SIGNS = {
+    "ா": "aa",
+    "ி": "i",
+    "ீ": "ii",
+    "ு": "u",
+    "ூ": "uu",
+    "ெ": "e",
+    "ே": "ee",
+    "ை": "ai",
+    "ொ": "o",
+    "ோ": "oo",
+    "ௌ": "au",
+}
+_TAMIL_CONSONANTS = {
+    "க": "k",
+    "ங": "ng",
+    "ச": "s",
+    "ஞ": "ny",
+    "ட": "t",
+    "ண": "n",
+    "த": "th",
+    "ந": "n",
+    "ப": "p",
+    "ம": "m",
+    "ய": "y",
+    "ர": "r",
+    "ல": "l",
+    "வ": "v",
+    "ழ": "l",
+    "ள": "l",
+    "ற": "r",
+    "ன": "n",
+    "ஜ": "j",
+    "ஷ": "sh",
+    "ஸ": "s",
+    "ஹ": "h",
+}
 # stop: (initial, geminate, after homorganic nasal, between vowels / after other consonants)
-_TAMIL_STOPS = {"க": ("k", "kk", "", "g", "k"), "ச": ("s", "tch", "j", "s", "ch"), "ட": ("d", "tt", "d", "d", "t"),
-                "த": ("th", "tth", "dh", "dh", "th"), "ப": ("p", "pp", "b", "b", "p"), "ற": ("r", "tr", "dr", "r", "r")}
+_TAMIL_STOPS = {
+    "க": ("k", "kk", "", "g", "k"),
+    "ச": ("s", "tch", "j", "s", "ch"),
+    "ட": ("d", "tt", "d", "d", "t"),
+    "த": ("th", "tth", "dh", "dh", "th"),
+    "ப": ("p", "pp", "b", "b", "p"),
+    "ற": ("r", "tr", "dr", "r", "r"),
+}
 _TAMIL_NASAL_OF = {"க": "ங", "ச": "ஞ", "ட": "ண", "த": "ந", "ப": "ம", "ற": "ன"}
 _PULLI = "்"
 
 
 def tamil_label(text: str) -> str:
+    """Pronunciation label of a Tamil word, stops voiced by position (module docstring); '' for an unmapped
+    character."""
     units: list[dict] = []  # {char, consonant, vowel}
     for char in text:
         if char in _TAMIL_CONSONANTS:

@@ -16,6 +16,9 @@ from echora_kara.inference.cli import main
 
 
 def run() -> None:
+    """Serve requests from stdin until EOF: each line is a JSON object with an ``argv`` string list, run through
+    ``cli.main`` and answered by one JSON line on stdout: ``ok`` plus the captured ``logs`` (last 4000 characters),
+    or ``ok: false`` with ``error`` and ``traceback`` (last 8000 characters)."""
     protocol_out = sys.stdout
     for raw in sys.stdin:
         try:

@@ -27,6 +27,7 @@ new lists. Two stages:
 ``repeat_metadata``: ``line_repeat[i]`` = how many immediately preceding lines have the same transcript,
 plus the gap to the previous line, for a repeat-aware decoder prior / harness slicing — no label change.
 """
+
 from __future__ import annotations
 
 from collections import defaultdict
@@ -34,11 +35,11 @@ from collections import defaultdict
 from echora_kara.data.tail_trim import apply_trims, fragment_key
 
 POLICY_VERSION = "label_policy_v2"
-PHRASE_GAP = 0.25           # background words closer than this belong to one phrase
-MAX_PHRASE_OVERLAP = 0.10   # share of a background phrase under lead that still keeps it supervised
-MAX_TRIM_SHARE = 0.5        # a fragment's end moves to the next onset only for overlaps up to this share
+PHRASE_GAP = 0.25  # background words closer than this belong to one phrase
+MAX_PHRASE_OVERLAP = 0.10  # share of a background phrase under lead that still keeps it supervised
+MAX_TRIM_SHARE = 0.5  # a fragment's end moves to the next onset only for overlaps up to this share
 MAX_TRIM_SECONDS = 2.0
-ECHO_SLACK = 0.05           # a parenthesised phrase starting within this of the previous lead end "abuts"
+ECHO_SLACK = 0.05  # a parenthesised phrase starting within this of the previous lead end "abuts"
 PARENS = {"(": ")", "[": "]", "（": "）"}
 
 
@@ -57,6 +58,7 @@ def _fragments(units: list[dict]) -> dict[tuple[float, float], list[dict]]:
 
 # ---------------------------------------------------------------------------------------------
 # 1. Parenthesised lead phrases
+
 
 def _paren_phrases(line: list[dict]) -> list[list[tuple[float, float]]]:
     """Fragment keys of each parenthesised run of lead words in the line, in order."""
@@ -83,13 +85,19 @@ def _paren_phrases(line: list[dict]) -> list[list[tuple[float, float]]]:
 
 
 def parenthesised_lead_to_background(lines: list[list[dict]]) -> tuple[list[list[dict]], dict]:
+    """Step 1: retag parenthesised lead phrases that abut or overlap the preceding lead fragment as background.
+
+    Mutates the units in place (``vocal_role``, ``background_source``) and returns (lines, stats)."""
     stats = {"paren_phrases": 0, "paren_phrases_to_background": 0}
     lead_ends = sorted((key[1], key[0]) for line in lines for key in _fragments([u for u in line if _is_lead(u)]))
     for line in lines:
         for phrase in _paren_phrases(line):
             stats["paren_phrases"] += 1
             start = phrase[0][0]
-            previous_end = max((end for end, begin in lead_ends if begin < start and end > 0 and (begin, end) not in phrase), default=None)
+            previous_end = max(
+                (end for end, begin in lead_ends if begin < start and end > 0 and (begin, end) not in phrase),
+                default=None,
+            )
             if previous_end is None or start > previous_end + ECHO_SLACK:
                 continue
             stats["paren_phrases_to_background"] += 1
@@ -104,8 +112,11 @@ def parenthesised_lead_to_background(lines: list[list[dict]]) -> tuple[list[list
 # ---------------------------------------------------------------------------------------------
 # 2. Phrase-level background resolution
 
+
 def _phrases_of(line: list[dict]) -> list[list[tuple[float, float]]]:
-    keys = sorted(_fragments([u for u in line if u.get("vocal_role") == "background" and u.get("text") and not u.get("ignore")]))
+    keys = sorted(
+        _fragments([u for u in line if u.get("vocal_role") == "background" and u.get("text") and not u.get("ignore")])
+    )
     phrases: list[list[tuple[float, float]]] = []
     for key in keys:
         if phrases and key[0] - phrases[-1][-1][1] < PHRASE_GAP:
@@ -115,13 +126,16 @@ def _phrases_of(line: list[dict]) -> list[list[tuple[float, float]]]:
     return phrases
 
 
-
-
 def _mask(unit: dict, reason: str) -> None:
     if unit.get("ignore"):
         return
-    unit.update(source_text=unit.get("source_text") or unit["text"], text="", ignore=True, soft_ignore=True,
-                normalization_error=reason)
+    unit.update(
+        source_text=unit.get("source_text") or unit["text"],
+        text="",
+        ignore=True,
+        soft_ignore=True,
+        normalization_error=reason,
+    )
     unit.pop("timing_method", None)
 
 
@@ -139,8 +153,14 @@ def resolve_background_phrases(lines: list[list[dict]]) -> tuple[list[list[dict]
       (``overlapping_background_phrase``; the lead underneath stays supervised) and supervised on the
       background head only.
     Every unit records ``phrase`` and ``background_category``."""
-    stats = {"background_phrases": 0, "background_phrases_sequential": 0, "background_phrases_simultaneous": 0,
-             "background_words_trimmed": 0, "background_units_sequential": 0, "background_units_simultaneous": 0}
+    stats = {
+        "background_phrases": 0,
+        "background_phrases_sequential": 0,
+        "background_phrases_simultaneous": 0,
+        "background_words_trimmed": 0,
+        "background_units_sequential": 0,
+        "background_units_simultaneous": 0,
+    }
     lead = sorted(key for line in lines for key in _fragments([u for u in line if _is_lead(u)]))
     phrase_index = 0
     trims: dict[tuple[float, float], float] = {}
@@ -176,7 +196,10 @@ def resolve_background_phrases(lines: list[list[dict]]) -> tuple[list[list[dict]
 # ---------------------------------------------------------------------------------------------
 # 3. Lead-lead overlaps
 
+
 def trim_lead_overlaps(lines: list[list[dict]]) -> tuple[list[list[dict]], dict]:
+    """Step 3: end an overlapping lead fragment at the next one's onset when the overlap is at most half of it and
+    ≤ 2 s; larger overlaps are kept. Every overlapping unit records ``overlap``; returns (lines, stats)."""
     stats = {"lead_overlaps": 0, "lead_overlaps_trimmed": 0, "lead_overlap_seconds": 0.0, "lead_overlaps_kept": 0}
     line_of: dict[tuple[float, float], int] = {}
     for index, line in enumerate(lines):
@@ -193,10 +216,20 @@ def trim_lead_overlaps(lines: list[list[dict]]) -> tuple[list[list[dict]], dict]
         stats["lead_overlap_seconds"] += overlap
         duration = previous[1] - previous[0]
         trimmed = overlap <= MAX_TRIM_SHARE * duration and overlap <= MAX_TRIM_SECONDS and current[0] > previous[0]
-        record = {"seconds": round(overlap, 3), "with_line": line_of[current], "resolution": "trimmed_to_next_onset" if trimmed else "kept"}
+        record = {
+            "seconds": round(overlap, 3),
+            "with_line": line_of[current],
+            "resolution": "trimmed_to_next_onset" if trimmed else "kept",
+        }
         overlaps[previous] = record
-        overlaps.setdefault(current, {"seconds": round(overlap, 3), "with_line": line_of[previous],
-                                      "resolution": "onset_kept" if trimmed else "kept"})
+        overlaps.setdefault(
+            current,
+            {
+                "seconds": round(overlap, 3),
+                "with_line": line_of[previous],
+                "resolution": "onset_kept" if trimmed else "kept",
+            },
+        )
         if trimmed:
             trims[previous] = round(current[0], 3)
             stats["lead_overlaps_trimmed"] += 1
@@ -215,6 +248,7 @@ def trim_lead_overlaps(lines: list[list[dict]]) -> tuple[list[list[dict]], dict]
 
 # ---------------------------------------------------------------------------------------------
 # 4. Repeats
+
 
 def repeat_metadata(lines: list[list[dict]]) -> list[dict]:
     """Per line: transcript repeat count against the previous lines and the gap to the previous line."""
@@ -247,8 +281,13 @@ def background_targets(lines: list[list[dict]]) -> list[dict]:
                 continue
             key = fragment_key(unit)
             overlap = sum(max(0.0, min(key[1], e) - max(key[0], s)) for s, e in lead) if key else 0.0
-            targets.append({**{k: v for k, v in unit.items() if k not in ("normalizer_items", "display_text", "normalizer")},
-                            "line": index, "lead_overlap": round(overlap, 3)})
+            targets.append(
+                {
+                    **{k: v for k, v in unit.items() if k not in ("normalizer_items", "display_text", "normalizer")},
+                    "line": index,
+                    "lead_overlap": round(overlap, 3),
+                }
+            )
     return targets
 
 
@@ -268,12 +307,17 @@ def finalize(lines: list[list[dict]], activity: dict | None = None) -> tuple[lis
     4. Main-head decision per background phrase against the trimmed lead fragments.
     """
     from echora_kara.data import tail_trim
+
     stats: dict = {"activity": None}
     if activity is not None and activity.get("method") == "stem_energy":
         units = [u for line in lines for u in line]
         trims = tail_trim.plan_trims(units, activity["activity"])
         lines, s = tail_trim.apply_trims(lines, trims, "blank", activity["method"])
-        stats.update(activity="stem_energy", tail_fragments_trimmed=s["fragments_trimmed"], tail_seconds_trimmed=s["seconds_trimmed"])
+        stats.update(
+            activity="stem_energy",
+            tail_fragments_trimmed=s["fragments_trimmed"],
+            tail_seconds_trimmed=s["seconds_trimmed"],
+        )
     lines, s = trim_lead_overlaps(lines)
     stats.update(s)
     background = background_targets(lines)

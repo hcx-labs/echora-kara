@@ -5,6 +5,7 @@ noise and codec changes keep the timeline; tempo changes scale it, and every tok
 with the audio (``scale_tokens``). Most effects run as one FFmpeg filter chain inside the decode
 that already happens per window, so augmentation adds almost no CPU work.
 """
+
 from __future__ import annotations
 
 import functools
@@ -21,6 +22,8 @@ TIME_KEYS = ("start", "end", "region_start", "region_end")
 
 @dataclass(frozen=True)
 class AugmentConfig:
+    """Per-window probabilities and ranges of each augmentation (pitch in semitones, noise SNR in dB)."""
+
     pitch_probability: float = 0.4
     pitch_semitones: float = 3.0
     formant_probability: float = 0.2  # of pitch-shifted windows: let formants move with the pitch
@@ -38,6 +41,7 @@ class AugmentConfig:
 @dataclass
 class Plan:
     """The effects chosen for one window."""
+
     filters: list[str] = field(default_factory=list)
     tempo: float = 1.0
     noise_snr_db: float | None = None
@@ -46,6 +50,10 @@ class Plan:
 
 
 def plan(config: AugmentConfig, rng: random.Random) -> Plan:
+    """Draw one window's effects: the FFmpeg filter chain plus the tempo, noise and codec choices.
+
+    Pitch and tempo share one rubberband filter; ``Plan.tempo`` is what ``scale_tokens`` must apply to the labels.
+    """
     chosen = Plan()
     pitch, tempo = 1.0, 1.0
     if rng.random() < config.pitch_probability:
@@ -63,20 +71,25 @@ def plan(config: AugmentConfig, rng: random.Random) -> Plan:
         for _ in range(rng.randint(1, 3)):
             chosen.filters.append(
                 f"equalizer=f={rng.choice((120, 250, 500, 1000, 2500, 4000, 7000))}:t=q:w={rng.uniform(0.7, 2.0):.2f}"
-                f":g={rng.uniform(-8, 8):.1f}")
+                f":g={rng.uniform(-8, 8):.1f}"
+            )
         chosen.names.append("eq")
     if rng.random() < config.telephone_probability:
         chosen.filters.append(f"highpass=f={rng.uniform(250, 450):.0f},lowpass=f={rng.uniform(3000, 4000):.0f}")
         chosen.names.append("telephone")
     if rng.random() < config.compression_probability:
-        chosen.filters.append(f"acompressor=threshold={rng.uniform(0.05, 0.3):.3f}:ratio={rng.uniform(2, 6):.1f}"
-                              f":attack={rng.uniform(5, 30):.0f}:release={rng.uniform(50, 250):.0f}")
+        chosen.filters.append(
+            f"acompressor=threshold={rng.uniform(0.05, 0.3):.3f}:ratio={rng.uniform(2, 6):.1f}"
+            f":attack={rng.uniform(5, 30):.0f}:release={rng.uniform(50, 250):.0f}"
+        )
         chosen.names.append("compress")
     if rng.random() < config.echo_probability:
         # Light, short reflections: long reverb tails would spill sound past word ends.
         delay = rng.uniform(15, 60)
-        chosen.filters.append(f"aecho=0.8:{rng.uniform(0.6, 0.85):.2f}:{delay:.0f}|{delay * 1.7:.0f}"
-                              f":{rng.uniform(0.1, 0.3):.2f}|{rng.uniform(0.05, 0.2):.2f}")
+        chosen.filters.append(
+            f"aecho=0.8:{rng.uniform(0.6, 0.85):.2f}:{delay:.0f}|{delay * 1.7:.0f}"
+            f":{rng.uniform(0.1, 0.3):.2f}|{rng.uniform(0.05, 0.2):.2f}"
+        )
         chosen.names.append("echo")
     if rng.random() < config.noise_probability:
         chosen.noise_snr_db = rng.uniform(*config.noise_snr_db)
@@ -101,8 +114,8 @@ def add_noise(waveform: np.ndarray, snr_db: float, rng: random.Random) -> np.nda
     spectrum = np.fft.rfft(white)
     spectrum /= np.sqrt(np.maximum(np.arange(spectrum.size), 1))
     noise = np.fft.irfft(spectrum, n=waveform.size).astype(np.float32)
-    signal_power = float(np.mean(waveform ** 2)) or 1e-8
-    noise *= math.sqrt(signal_power / (10 ** (snr_db / 10)) / (float(np.mean(noise ** 2)) or 1e-8))
+    signal_power = float(np.mean(waveform**2)) or 1e-8
+    noise *= math.sqrt(signal_power / (10 ** (snr_db / 10)) / (float(np.mean(noise**2)) or 1e-8))
     return waveform + noise
 
 
@@ -112,13 +125,56 @@ CODECS = (("libmp3lame", "48k"), ("libmp3lame", "64k"), ("aac", "48k"), ("aac", 
 def _round_trip(waveform: np.ndarray, codec: str, bitrate: str) -> np.ndarray:
     muxer, demuxer = ("mp3", "mp3") if codec == "libmp3lame" else ("adts", "aac")
     encoded = subprocess.run(
-        ["ffmpeg", "-nostdin", "-loglevel", "error", "-f", "f32le", "-ar", str(SAMPLE_RATE), "-ac", "1", "-i", "pipe:0",
-         "-c:a", codec, "-b:a", bitrate, "-f", muxer, "pipe:1"],
-        input=waveform.astype(np.float32).tobytes(), stdout=subprocess.PIPE, check=True).stdout
-    return np.frombuffer(subprocess.run(
-        ["ffmpeg", "-nostdin", "-loglevel", "error", "-f", demuxer, "-i", "pipe:0", "-ac", "1",
-         "-ar", str(SAMPLE_RATE), "-f", "f32le", "pipe:1"],
-        input=encoded, stdout=subprocess.PIPE, check=True).stdout, dtype=np.float32)
+        [
+            "ffmpeg",
+            "-nostdin",
+            "-loglevel",
+            "error",
+            "-f",
+            "f32le",
+            "-ar",
+            str(SAMPLE_RATE),
+            "-ac",
+            "1",
+            "-i",
+            "pipe:0",
+            "-c:a",
+            codec,
+            "-b:a",
+            bitrate,
+            "-f",
+            muxer,
+            "pipe:1",
+        ],
+        input=waveform.astype(np.float32).tobytes(),
+        stdout=subprocess.PIPE,
+        check=True,
+    ).stdout
+    return np.frombuffer(
+        subprocess.run(
+            [
+                "ffmpeg",
+                "-nostdin",
+                "-loglevel",
+                "error",
+                "-f",
+                demuxer,
+                "-i",
+                "pipe:0",
+                "-ac",
+                "1",
+                "-ar",
+                str(SAMPLE_RATE),
+                "-f",
+                "f32le",
+                "pipe:1",
+            ],
+            input=encoded,
+            stdout=subprocess.PIPE,
+            check=True,
+        ).stdout,
+        dtype=np.float32,
+    )
 
 
 @functools.lru_cache(maxsize=None)
@@ -130,10 +186,12 @@ def codec_delay(codec: str, bitrate: str) -> int:
     """
     probe = np.zeros(SAMPLE_RATE * 2, np.float32)
     click = np.random.default_rng(0).standard_normal(800).astype(np.float32) * 0.5
-    probe[SAMPLE_RATE // 2:SAMPLE_RATE // 2 + click.size] = click
+    probe[SAMPLE_RATE // 2 : SAMPLE_RATE // 2 + click.size] = click
     decoded = _round_trip(probe, codec, bitrate)
-    scores = [float(np.dot(click, decoded[SAMPLE_RATE // 2 + lag:SAMPLE_RATE // 2 + lag + click.size]))
-              for lag in range(0, 4096)]
+    scores = [
+        float(np.dot(click, decoded[SAMPLE_RATE // 2 + lag : SAMPLE_RATE // 2 + lag + click.size]))
+        for lag in range(0, 4096)
+    ]
     return int(np.argmax(scores))
 
 
@@ -142,7 +200,7 @@ def codec_round_trip(waveform: np.ndarray, rng: random.Random) -> np.ndarray:
     codec, bitrate = rng.choice(CODECS)
     decoded = _round_trip(waveform, codec, bitrate)
     delay = codec_delay(codec, bitrate)
-    aligned = decoded[delay:delay + waveform.size]
+    aligned = decoded[delay : delay + waveform.size]
     if aligned.size < waveform.size:
         aligned = np.pad(aligned, (0, waveform.size - aligned.size))
     return aligned.astype(np.float32)

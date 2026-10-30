@@ -13,6 +13,7 @@ backing marks, which the aligner knows from parentheses. Same scoring as checkpo
 
 usage: python -m echora_kara.evaluation.shuffle_align --emissions stem_emissions --costs 0,1,3,10
 """
+
 import argparse
 import json
 import random
@@ -64,14 +65,28 @@ def shuffle_viterbi(emission, lead, backing, switch_cost):
         new[3] = options.max(0) + blank[t]
         # lead letter i (encoded: 1 stay, 10+s advance from state s at i-1)
         if M:
-            options = np.stack([la[1:], bl[:-1], np.where(a_direct[1:, None], la[:-1], NEG),
-                                ba[:-1] - switch_cost, bb[:-1] - switch_cost])
+            options = np.stack(
+                [
+                    la[1:],
+                    bl[:-1],
+                    np.where(a_direct[1:, None], la[:-1], NEG),
+                    ba[:-1] - switch_cost,
+                    bb[:-1] - switch_cost,
+                ]
+            )
             codes = np.array([1, 10, 11, 12, 13], dtype=np.int8)
             back[t, 1, 1:] = codes[options.argmax(0)]
             new[1, 1:] = options.max(0) + emission[t, a][:, None]
         if N:
-            options = np.stack([ba[:, 1:], bb[:, :-1], np.where(b_direct[None, 1:], ba[:, :-1], NEG),
-                                la[:, :-1] - switch_cost, bl[:, :-1] - switch_cost])
+            options = np.stack(
+                [
+                    ba[:, 1:],
+                    bb[:, :-1],
+                    np.where(b_direct[None, 1:], ba[:, :-1], NEG),
+                    la[:, :-1] - switch_cost,
+                    bl[:, :-1] - switch_cost,
+                ]
+            )
             codes = np.array([2, 13, 12, 11, 10], dtype=np.int8)
             back[t, 2, :, 1:] = codes[options.argmax(0)]
             new[2, :, 1:] = options.max(0) + emission[t, b][None, :]
@@ -122,6 +137,9 @@ def segments(words):
 
 
 def align_song(emission, words, base, switch_cost):
+    """Re-place the words of every backing segment with ``shuffle_viterbi`` inside the segment's single-path span
+    (±PAD frames, clamped to its neighbours); returns (start_frame, end_frame) per word, keeping ``base`` for words
+    outside segments and for segments with no path."""
     placed = list(base)
     for group in segments(words):
         inside = [k for k, w in enumerate(words) if w["line"] in group]
@@ -144,7 +162,7 @@ def align_song(emission, words, base, switch_cost):
         for keys, frames in ((lead, lead_frames), (backing, back_frames)):
             cursor = 0
             for k in keys:
-                own = frames[cursor:cursor + len(words[k]["ids"])]
+                own = frames[cursor : cursor + len(words[k]["ids"])]
                 cursor += len(words[k]["ids"])
                 placed[k] = (lo + own[0][0], lo + own[-1][1] + 1)
     return placed
@@ -164,9 +182,17 @@ def song_words(song):
                 ids, restored = [LETTERS[c] for c in text], True
         if not ids or (t.get("ignore") and not restored):
             continue
-        words.append({"start": float(t["start"]), "end": float(t["end"]), "ids": ids,
-                      "text": t.get("text") or t.get("source_text", ""), "line": t["line"],
-                      "background": t.get("vocal_role") == "background", "restored": restored})
+        words.append(
+            {
+                "start": float(t["start"]),
+                "end": float(t["end"]),
+                "ids": ids,
+                "text": t.get("text") or t.get("source_text", ""),
+                "line": t["line"],
+                "background": t.get("vocal_role") == "background",
+                "restored": restored,
+            }
+        )
     return words
 
 
@@ -181,6 +207,8 @@ def backing_metrics(words, placed):
 
 
 def main():
+    """Compare the single path with shuffle alignment at each switch cost on cached test-song emissions; prints
+    all-word and lead/backing summaries and writes --out/report.json."""
     parser = argparse.ArgumentParser()
     parser.add_argument("--data", default="test.jsonl")
     parser.add_argument("--songs", type=int, default=80)
@@ -191,7 +219,7 @@ def main():
     songs = [json.loads(line) for line in open(args.data)]
     songs = [s for s in songs if s.get("source_timing_granularity") in ("word", "syllable")]
     random.Random(7).shuffle(songs)
-    songs = songs[:args.songs]
+    songs = songs[: args.songs]
     costs = [float(c) for c in args.costs.split(",")]
     rows = {"v6 single path": [], **{f"shuffle, switch cost {c:g}": [] for c in costs}}
     backing_rows = {name: [] for name in rows}  # the songs that have backing words
@@ -216,32 +244,45 @@ def main():
                 backing_rows[f"shuffle, switch cost {c:g}"].append(backing_metrics(words, placed))
         if number % 10 == 0:
             print(f"{number}/{len(songs)} songs, {time.time() - started:.0f}s", flush=True)
+
     def backing_summary(rs):
         back = np.array([e for r in rs for e in r["backing_errors"]]) * 1000
         lead = np.array([e for r in rs for e in r["lead_errors"]]) * 1000
         pairs = sum(r["pairs"] for r in rs)
-        return {"songs": len(rs), "lead_backing_pairs": pairs,
-                "recovered": round(sum(r["recovered"] for r in rs) / max(1, pairs), 3),
-                "backing_words": int(back.size), "backing_median_ms": round(float(np.median(back)), 1),
-                "backing_mean_ms": round(float(back.mean()), 1), "backing_over_500": int((back > 500).sum()),
-                "lead_median_ms": round(float(np.median(lead)), 1), "lead_mean_ms": round(float(lead.mean()), 1),
-                "lead_over_500": int((lead > 500).sum())}
+        return {
+            "songs": len(rs),
+            "lead_backing_pairs": pairs,
+            "recovered": round(sum(r["recovered"] for r in rs) / max(1, pairs), 3),
+            "backing_words": int(back.size),
+            "backing_median_ms": round(float(np.median(back)), 1),
+            "backing_mean_ms": round(float(back.mean()), 1),
+            "backing_over_500": int((back > 500).sum()),
+            "lead_median_ms": round(float(np.median(lead)), 1),
+            "lead_mean_ms": round(float(lead.mean()), 1),
+            "lead_over_500": int((lead > 500).sum()),
+        }
 
-    report = {"all songs": {n: proto.summarize(r) for n, r in rows.items()},
-              "songs with backing": {n: backing_summary(r) for n, r in backing_rows.items()}}
+    report = {
+        "all songs": {n: proto.summarize(r) for n, r in rows.items()},
+        "songs with backing": {n: backing_summary(r) for n, r in backing_rows.items()},
+    }
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     (out / "report.json").write_text(json.dumps(report, indent=2))
     print("== all songs (all words; overlaps here are lead lines overlapping each other)")
     for name, value in report["all songs"].items():
         e = value["errors"]
-        print(f"{name:26} start {e['median_ms']}/{e['mean_ms']} ms >500ms {e['over_500ms']:5d} | "
-              f"invented overlaps {value['invented_overlap_rate']:.1%}")
+        print(
+            f"{name:26} start {e['median_ms']}/{e['mean_ms']} ms >500ms {e['over_500ms']:5d} | "
+            f"invented overlaps {value['invented_overlap_rate']:.1%}"
+        )
     print("== songs with backing words: lead/backing overlaps")
     for name, v in report["songs with backing"].items():
-        print(f"{name:26} recovered {v['recovered']:.0%} of {v['lead_backing_pairs']} | backing start "
-              f"{v['backing_median_ms']}/{v['backing_mean_ms']} ms >500 {v['backing_over_500']}/{v['backing_words']} | "
-              f"lead {v['lead_median_ms']}/{v['lead_mean_ms']} ms >500 {v['lead_over_500']}")
+        print(
+            f"{name:26} recovered {v['recovered']:.0%} of {v['lead_backing_pairs']} | backing start "
+            f"{v['backing_median_ms']}/{v['backing_mean_ms']} ms >500 {v['backing_over_500']}/{v['backing_words']} | "
+            f"lead {v['lead_median_ms']}/{v['lead_mean_ms']} ms >500 {v['lead_over_500']}"
+        )
 
 
 if __name__ == "__main__":

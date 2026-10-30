@@ -56,6 +56,8 @@ DEFAULT_LAYER = 11
 class _Captured(Exception):
     """Raised by the deepest wanted hook so the conformer stops there (blocks past the fused
     layer are never run)."""
+
+
 FUSION_KINDS = ("muq",)
 FUSION_MODES = ("off", "on", "gate0")
 FUSION_PREFIX = "fusion."
@@ -75,9 +77,16 @@ def fusion_config(layer: int, gate: str = "scalar", model: str = MUQ_MODEL_ID, l
         raise ValueError(f"fusion layer must be one of {MUQ_LAYERS}")
     if gate not in ("scalar", "channel"):
         raise ValueError("fusion gate must be 'scalar' or 'channel'")
-    record = {"kind": "muq", "model": model, "layer": int(layer), "gate": gate, "dim": MUQ_DIM,
-              "sample_rate": MUQ_SAMPLE_RATE, "stride_seconds": MUQ_STRIDE_SECONDS,
-              "offset_seconds": MUQ_OFFSET_SECONDS}
+    record = {
+        "kind": "muq",
+        "model": model,
+        "layer": int(layer),
+        "gate": gate,
+        "dim": MUQ_DIM,
+        "sample_rate": MUQ_SAMPLE_RATE,
+        "stride_seconds": MUQ_STRIDE_SECONDS,
+        "offset_seconds": MUQ_OFFSET_SECONDS,
+    }
     if lora:
         record["lora"] = lora
     return record
@@ -88,9 +97,12 @@ def fusion_config(layer: int, gate: str = "scalar", model: str = MUQ_MODEL_ID, l
 
 # Linear sub-modules of a conformer block (Wav2Vec2ConformerEncoderLayer) and their (in, out) sizes.
 LORA_MODULES = {
-    "self_attn.linear_q": (MUQ_DIM, MUQ_DIM), "self_attn.linear_v": (MUQ_DIM, MUQ_DIM),
-    "ffn1.intermediate_dense": (MUQ_DIM, 4 * MUQ_DIM), "ffn1.output_dense": (4 * MUQ_DIM, MUQ_DIM),
-    "ffn2.intermediate_dense": (MUQ_DIM, 4 * MUQ_DIM), "ffn2.output_dense": (4 * MUQ_DIM, MUQ_DIM),
+    "self_attn.linear_q": (MUQ_DIM, MUQ_DIM),
+    "self_attn.linear_v": (MUQ_DIM, MUQ_DIM),
+    "ffn1.intermediate_dense": (MUQ_DIM, 4 * MUQ_DIM),
+    "ffn1.output_dense": (4 * MUQ_DIM, MUQ_DIM),
+    "ffn2.intermediate_dense": (MUQ_DIM, 4 * MUQ_DIM),
+    "ffn2.output_dense": (4 * MUQ_DIM, MUQ_DIM),
 }
 LORA_TARGETS = {"qv": ("self_attn.linear_q", "self_attn.linear_v"), "qv_ffn": tuple(LORA_MODULES)}
 
@@ -103,8 +115,12 @@ def lora_config(rank: int, alpha: float, layers: int, fused_layer: int, targets:
         raise ValueError("LoRA needs rank > 0, layers > 0 and a fused layer >= 1")
     if targets not in LORA_TARGETS:
         raise ValueError(f"LoRA targets must be one of {tuple(LORA_TARGETS)}")
-    return {"rank": int(rank), "alpha": float(alpha), "blocks": list(range(max(1, top - int(layers) + 1), top + 1)),
-            "targets": targets}
+    return {
+        "rank": int(rank),
+        "alpha": float(alpha),
+        "blocks": list(range(max(1, top - int(layers) + 1), top + 1)),
+        "targets": targets,
+    }
 
 
 class LoRALinear(torch.nn.Module):
@@ -118,10 +134,12 @@ class LoRALinear(torch.nn.Module):
         self.reset_parameters()
 
     def reset_parameters(self) -> None:
+        """Kaiming-uniform A and zero B, so the adapter adds nothing until trained."""
         torch.nn.init.kaiming_uniform_(self.lora_a, a=math.sqrt(5))
         torch.nn.init.zeros_(self.lora_b)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """The low-rank update ``scale * B A x`` for input ``x`` (..., in_features), in the adapter's dtype."""
         x = x.to(self.lora_a.dtype)
         return (x @ self.lora_a.t() @ self.lora_b.t()) * self.scale
 
@@ -133,15 +151,24 @@ class MuQLoRA(torch.nn.Module):
     def __init__(self, record: dict):
         super().__init__()
         self.record = dict(record)
-        self.adapters = torch.nn.ModuleDict({
-            f"b{block}__{name.replace('.', '__')}": LoRALinear(*LORA_MODULES[name], int(record["rank"]), float(record["alpha"]))
-            for block in record["blocks"] for name in LORA_TARGETS[record["targets"]]})
+        self.adapters = torch.nn.ModuleDict(
+            {
+                f"b{block}__{name.replace('.', '__')}": LoRALinear(
+                    *LORA_MODULES[name], int(record["rank"]), float(record["alpha"])
+                )
+                for block in record["blocks"]
+                for name in LORA_TARGETS[record["targets"]]
+            }
+        )
 
     def reset_parameters(self) -> None:
+        """Reset every adapter to its no-op initial state."""
         for adapter in self.adapters.values():
             adapter.reset_parameters()
 
     def attach(self, branch: "MuQBranch") -> None:
+        """Register forward hooks that add each adapter's output to its conformer linear layer in ``branch``,
+        replacing any hooks attached before, and record this LoRA as ``branch.lora``."""
         layers = branch.muq.model.conformer.layers
         for handle in getattr(branch, "lora_handles", []):
             handle.remove()
@@ -152,6 +179,7 @@ class MuQLoRA(torch.nn.Module):
 
             def hook(_, inputs, output, adapter=adapter):
                 return output + adapter(inputs[0]).to(output.dtype)
+
             branch.lora_handles.append(module.register_forward_hook(hook))
         branch.lora = self
 
@@ -167,9 +195,14 @@ def load_fusion_lora(model_dir: str, record: dict) -> MuQLoRA:
     return lora.eval()
 
 
-def to_frame_clock(features: torch.Tensor, frames: int, stride_seconds: float, offset_seconds: float,
-                   source_stride_seconds: float = MUQ_STRIDE_SECONDS,
-                   source_offset_seconds: float = MUQ_OFFSET_SECONDS) -> torch.Tensor:
+def to_frame_clock(
+    features: torch.Tensor,
+    frames: int,
+    stride_seconds: float,
+    offset_seconds: float,
+    source_stride_seconds: float = MUQ_STRIDE_SECONDS,
+    source_offset_seconds: float = MUQ_OFFSET_SECONDS,
+) -> torch.Tensor:
     """Sample ``features`` (B, T, D) on ``source`` frame centres at the ``frames`` centres of the
     target clock (``offset + k * stride``) by linear interpolation, clamped at both ends."""
     count = features.shape[1]
@@ -196,11 +229,14 @@ class FusionAdapter(torch.nn.Module):
         self.reset_parameters()
 
     def reset_parameters(self) -> None:
+        """Xavier-uniform projection, zero bias and zero gate, so a fresh adapter adds nothing."""
         torch.nn.init.xavier_uniform_(self.proj.weight)
         torch.nn.init.zeros_(self.proj.bias)
         torch.nn.init.zeros_(self.gate)
 
     def forward(self, features: torch.Tensor) -> torch.Tensor:
+        """Gated projection of MuQ ``features`` (B, T, source_dim) to (B, T, hidden_size), cast to the projection's
+        dtype. The ``force_zero`` ablation is applied by the caller, not here."""
         # MuQ runs in float32; a bf16-loaded model (eval --bf16, inference) needs them in its dtype.
         # Under training autocast this is a no-op (fp32 master weights).
         return self.gate * self.proj(features.to(self.proj.weight.dtype))
@@ -211,8 +247,12 @@ class MuQBranch:
     attached to the aligner outside its module tree so it is never trained, saved or moved by
     the Trainer (``AlignerMixin.attach_fusion_backbone``)."""
 
-    def __init__(self, model: str = MUQ_MODEL_ID, device: torch.device | str = "cpu",
-                 autocast_dtype: torch.dtype | None = torch.bfloat16):
+    def __init__(
+        self,
+        model: str = MUQ_MODEL_ID,
+        device: torch.device | str = "cpu",
+        autocast_dtype: torch.dtype | None = torch.bfloat16,
+    ):
         from muq import MuQ
 
         self.model_id = model
@@ -243,6 +283,7 @@ class MuQBranch:
                 self.captured[layer] = args[0]
                 if layer >= max(self.wanted):
                     raise _Captured
+
         return hook
 
     def _capture(self, layer: int):
@@ -251,16 +292,22 @@ class MuQBranch:
                 self.captured[layer] = output[0] if isinstance(output, (tuple, list)) else output
                 if layer >= max(self.wanted):
                     raise _Captured
+
         return hook
 
     def to(self, device) -> "MuQBranch":
+        """Move the MuQ encoder to ``device`` and return the branch."""
         self.device = torch.device(device)
         self.muq.to(self.device)
         return self
 
-    def features(self, waveform_16k: torch.Tensor, lengths_16k: torch.Tensor | None = None,
-                 layers: tuple[int, ...] | list[int] = (MUQ_FINAL_LAYER,),
-                 sample_rate: int = 16_000) -> dict[int, torch.Tensor]:
+    def features(
+        self,
+        waveform_16k: torch.Tensor,
+        lengths_16k: torch.Tensor | None = None,
+        layers: tuple[int, ...] | list[int] = (MUQ_FINAL_LAYER,),
+        sample_rate: int = 16_000,
+    ) -> dict[int, torch.Tensor]:
         """MuQ hidden states (float32, B x T x 1024) of ``layers`` for a batch of raw 16 kHz
         mono waveforms (B x L, zero-padded; ``lengths_16k`` marks the valid samples). The
         aligner path always passes 16 kHz audio; ``sample_rate`` exists for the layer probe's
@@ -270,8 +317,11 @@ class MuQBranch:
         waveform_16k = waveform_16k.to(self.device, torch.float32)
         if waveform_16k.dim() == 1:
             waveform_16k = waveform_16k[None]
-        lengths = ([int(n) for n in lengths_16k.tolist()] if lengths_16k is not None
-                   else [waveform_16k.shape[1]] * waveform_16k.shape[0])
+        lengths = (
+            [int(n) for n in lengths_16k.tolist()]
+            if lengths_16k is not None
+            else [waveform_16k.shape[1]] * waveform_16k.shape[0]
+        )
         self.wanted = set(int(layer) for layer in layers)
         # Gradients flow only through an attached LoRA in training mode; the base stays frozen.
         grad = self.lora is not None and self.lora.training and torch.is_grad_enabled()
@@ -286,10 +336,19 @@ class MuQBranch:
             # a padded sample: the conformer's depthwise convolutions read across the padding),
             # exactly as inference runs one chunk at a time; features past a sample's own last
             # frame repeat it, which is what the clock interpolation's clamping sees anyway.
-            per_sample = [self._encode(waveform_16k[i:i + 1, :length], sample_rate) for i, length in enumerate(lengths)]
+            per_sample = [
+                self._encode(waveform_16k[i : i + 1, :length], sample_rate) for i, length in enumerate(lengths)
+            ]
             count = max(out[next(iter(self.wanted))].shape[1] for out in per_sample)
-            return {layer: torch.cat([torch.cat([out[layer], out[layer][:, -1:].expand(-1, count - out[layer].shape[1], -1)], dim=1)
-                                      for out in per_sample]) for layer in self.wanted}
+            return {
+                layer: torch.cat(
+                    [
+                        torch.cat([out[layer], out[layer][:, -1:].expand(-1, count - out[layer].shape[1], -1)], dim=1)
+                        for out in per_sample
+                    ]
+                )
+                for layer in self.wanted
+            }
         finally:
             self.captured = {}
             self.wanted = set()
@@ -303,8 +362,11 @@ class MuQBranch:
             wave = torchaudio.functional.resample(wave, sample_rate, MUQ_SAMPLE_RATE)
         model = self.muq.model
         self.captured = {}
-        with torch.autocast(device_type=self.device.type, dtype=self.autocast_dtype,
-                            enabled=self.autocast_dtype is not None and self.device.type == "cuda"):
+        with torch.autocast(
+            device_type=self.device.type,
+            dtype=self.autocast_dtype,
+            enabled=self.autocast_dtype is not None and self.device.type == "cuda",
+        ):
             x = model.preprocessing(wave, features=["melspec_2048"])
             x = model.normalize(x)
             try:
@@ -339,15 +401,24 @@ def load_fusion_adapter(model_dir: str, config: dict, hidden_size: int) -> Fusio
     state = fusion_state_from_checkpoint(model_dir)
     expected = {FUSION_PREFIX + k for k in adapter.state_dict()}
     if set(state) != expected:
-        raise RuntimeError(f"fusion declared in config but its weights are missing in {model_dir}: "
-                           f"have {sorted(state)}, need {sorted(expected)}")
+        raise RuntimeError(
+            f"fusion declared in config but its weights are missing in {model_dir}: "
+            f"have {sorted(state)}, need {sorted(expected)}"
+        )
     adapter.load_state_dict({k.removeprefix(FUSION_PREFIX): v for k, v in state.items()})
     return adapter.eval()
 
 
-def fusion_term(adapter: FusionAdapter, branch: MuQBranch | None, waveform_16k: torch.Tensor,
-                lengths_16k: torch.Tensor | None, frames: int, layer: int,
-                stride_seconds: float, offset_seconds: float) -> torch.Tensor | None:
+def fusion_term(
+    adapter: FusionAdapter,
+    branch: MuQBranch | None,
+    waveform_16k: torch.Tensor,
+    lengths_16k: torch.Tensor | None,
+    frames: int,
+    layer: int,
+    stride_seconds: float,
+    offset_seconds: float,
+) -> torch.Tensor | None:
     """What is added to the aligner's hidden state (B x frames x hidden), or None when the
     adapter is forced to zero (ablation) and the plain model is wanted bit for bit."""
     if adapter.force_zero:

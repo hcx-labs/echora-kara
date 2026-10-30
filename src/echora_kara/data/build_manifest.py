@@ -60,6 +60,7 @@ Label round v2 (opt-in; the defaults build v1 labels):
   and songs titled live/remaster/edit whose offset is flagged; ``record`` (default) only stores it.
 - ``--near-duplicates drop``: one recording per (title, artist, duration ± 1.5 s) group.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -98,7 +99,9 @@ UNVERIFIED_LYRIC = "unverified_provider_lookup"
 # ---------------------------------------------------------------------------------------------
 # Caches
 
+
 def read_jsonl_cache(path: Path) -> dict:
+    """Records of an append-only JSONL cache by their ``key`` field (later lines win); {} when the file is missing."""
     values = {}
     if path.exists():
         with path.open() as source:
@@ -111,6 +114,7 @@ def read_jsonl_cache(path: Path) -> dict:
 
 # ---------------------------------------------------------------------------------------------
 # Recordings and audio identity
+
 
 def load_index(path: Path) -> tuple[dict[str, dict], int]:
     """Recordings of the JSONL index by id (lyrics path resolved), and the number of duplicate ids."""
@@ -131,20 +135,28 @@ def load_index(path: Path) -> tuple[dict[str, dict], int]:
 
 
 def audio_path(isrc: str, recordings: dict) -> str:
+    """Audio path of a recording relative to ``--audio-root``: the index entry's, else ``audio/<id>.m4a``."""
     return (recordings.get(isrc) or {}).get("audio") or f"audio/{isrc}.m4a"
 
 
 def audio_identity(isrc: str, entry: dict) -> dict:
     """Identity record of one recording's audio file (how it was matched, which hash)."""
     status = entry.get("audio_match_status") or "unverified_legacy"
-    identity = {"audio_match_status": status, "index_sha256": entry.get("audio_sha256"),
-                "index_bytes": entry.get("audio_bytes")}
+    identity = {
+        "audio_match_status": status,
+        "index_sha256": entry.get("audio_sha256"),
+        "index_bytes": entry.get("audio_bytes"),
+    }
     if status in ("exact_isrc", "isrc_mismatch"):
         identity.update(requested_isrc=isrc, matched_isrc=isrc)
     return identity
 
 
 def probe_audio(path: Path, trusted_sha: str | None, trusted_bytes: int | None) -> dict:
+    """ffprobe duration (seconds) and SHA-256 of an audio file, plus its size and mtime for cache invalidation.
+
+    The index's ``trusted_sha`` is reused without hashing when ``trusted_bytes`` matches the file size. An unreadable
+    file yields ``{"error": "ffprobe_failed", ...}`` instead of duration and hash."""
     stat = path.stat()
     actual = probe_duration(path)
     if actual is None:
@@ -166,15 +178,27 @@ _WORKER = {}
 def _init_worker(rules: str = "v1", policy: str = "v1"):
     from echora_kara.data import word_timed as builder
     from echora_kara.text.normalization import normalizer_version, training_language
-    _WORKER.update(builder=builder, version=normalizer_version(rules), training_language=training_language,
-                   rules=rules, policy=policy)
+
+    _WORKER.update(
+        builder=builder,
+        version=normalizer_version(rules),
+        training_language=training_language,
+        rules=rules,
+        policy=policy,
+    )
 
 
 def labels_key(doc_sha: str, rules: str = "v1", policy: str = "v1", hint: str | None = None) -> str:
+    """Labels-cache key of a document: its digest, normalizer version and builder version.
+
+    v1 rules with policy v1 keep the historical three-part key; any v2 build adds the policy version and the
+    normalizer ``hint`` language, so a changed final language invalidates the cached labels."""
     from echora_kara.text.normalization import normalizer_version
+
     if rules == "v1" and policy == "v1":
         return f"{doc_sha}:{normalizer_version('v1')}:{BUILDER_VERSION}"
     from echora_kara.data import label_policy as label_policy_v2
+
     return f"{doc_sha}:{normalizer_version(rules)}:{BUILDER_VERSION_V2}:{label_policy_v2.POLICY_VERSION if policy == 'v2' else 'policy_v1'}:{hint}"
 
 
@@ -197,26 +221,46 @@ def normalize_document(task: tuple[str, str]) -> tuple[str, dict]:
         hint = _WORKER["training_language"](normalizer_language(final_language or language["language"], rules), rules)
         lines = builder.timing_lines(ttml, hint, rules, policy)
         key = labels_key(doc_sha, rules, policy, hint)
-        extra = {"label_rules": rules, "label_policy": policy, "hint_language": final_language or language["language"],
-                 "policy_stats": {k: v for k, v in builder.TTML_AUDIT.items() if k.startswith(("paren", "background_phr", "background_words", "lead_overlap"))}}
+        extra = {
+            "label_rules": rules,
+            "label_policy": policy,
+            "hint_language": final_language or language["language"],
+            "policy_stats": {
+                k: v
+                for k, v in builder.TTML_AUDIT.items()
+                if k.startswith(("paren", "background_phr", "background_words", "lead_overlap"))
+            },
+        }
         if policy == "v2":
             from echora_kara.data import label_policy as label_policy_v2
+
             extra["line_repeat"] = label_policy_v2.repeat_metadata(lines)
     units = [unit for line in lines for unit in line]
     masks = Counter(unit["normalization_error"].split(":", 1)[0] for unit in units if unit.get("ignore"))
     usable = [unit for unit in units if unit.get("text") and not unit.get("ignore")]
-    record = {"isrc": isrc, "key": key, "doc_sha256": doc_sha, **extra,
-              "timing_granularity": builder.timing_granularity(ttml),
-              "language": language["language"], "language_source": language["source"],
-              "xml_lang": language["xml_lang"], "transliteration": language["transliteration"],
-              "normalizer_language": hint, "normalizer": f"echora.fa_kara.process_haruhi_line:{hint}+{_WORKER['version']}",
-              "timings": lines, "timing_units": len(units), "usable_units": len(usable),
-              "mask_reasons": dict(masks), "ttml_audit": dict(builder.TTML_AUDIT),
-              "lyric_start": round(min((u["start"] for u in units), default=0.0), 3),
-              "lyric_end": round(max((u["end"] for u in units), default=0.0), 3),
-              "usable_start": round(min((u["start"] for u in usable), default=0.0), 3),
-              "usable_end": round(max((u["end"] for u in usable), default=0.0), 3),
-              "nonfinite": any(not math.isfinite(u[k]) for u in units for k in ("start", "end"))}
+    record = {
+        "isrc": isrc,
+        "key": key,
+        "doc_sha256": doc_sha,
+        **extra,
+        "timing_granularity": builder.timing_granularity(ttml),
+        "language": language["language"],
+        "language_source": language["source"],
+        "xml_lang": language["xml_lang"],
+        "transliteration": language["transliteration"],
+        "normalizer_language": hint,
+        "normalizer": f"echora.fa_kara.process_haruhi_line:{hint}+{_WORKER['version']}",
+        "timings": lines,
+        "timing_units": len(units),
+        "usable_units": len(usable),
+        "mask_reasons": dict(masks),
+        "ttml_audit": dict(builder.TTML_AUDIT),
+        "lyric_start": round(min((u["start"] for u in units), default=0.0), 3),
+        "lyric_end": round(max((u["end"] for u in units), default=0.0), 3),
+        "usable_start": round(min((u["start"] for u in usable), default=0.0), 3),
+        "usable_end": round(max((u["end"] for u in usable), default=0.0), 3),
+        "nonfinite": any(not math.isfinite(u[k]) for u in units for k in ("start", "end")),
+    }
     return isrc, record
 
 
@@ -235,9 +279,12 @@ def v2_label_tasks(documents: dict, caches: Path, args) -> list[tuple[str, str, 
     The final language is the one the row will carry: document_language, then the cached fastText
     decision (resolve_language). v1 computes the hint from document_language alone."""
     from echora_kara.text.normalization import training_language
+
     heads = {}
     with Pool(args.workers) as pool:
-        for isrc, head in pool.imap_unordered(_v2_head, [(i, str(d["path"])) for i, d in documents.items()], chunksize=32):
+        for isrc, head in pool.imap_unordered(
+            _v2_head, [(i, str(d["path"])) for i, d in documents.items()], chunksize=32
+        ):
             heads[isrc] = head
     lid_cache_path = caches / "lid.jsonl"
     lid = {record["key"]: record for record in read_jsonl_cache(lid_cache_path).values()}
@@ -262,7 +309,7 @@ def v2_label_tasks(documents: dict, caches: Path, args) -> list[tuple[str, str, 
                 with cached.open() as source:
                     prefix = source.read(4096)
                 key_at = prefix.find('"key": "')
-                cached_key = prefix[key_at + 8:prefix.index('"', key_at + 8)] if key_at >= 0 else None
+                cached_key = prefix[key_at + 8 : prefix.index('"', key_at + 8)] if key_at >= 0 else None
                 if cached_key == labels_key(head["doc_sha256"], args.label_rules, args.label_policy, hint):
                     continue
             except (ValueError, OSError):
@@ -276,6 +323,7 @@ def _reference_quality_key(task: tuple[str, str, str]) -> tuple[str, str | None]
     """Worker: the quality-cache key of one song scored on its reference timings."""
     isrc, reference, sha = task
     from echora_kara.data import label_quality
+
     try:
         timings = json.loads(Path(reference).read_text())["timings"]
     except (OSError, ValueError, KeyError):
@@ -286,16 +334,23 @@ def _reference_quality_key(task: tuple[str, str, str]) -> tuple[str, str | None]
 def _quality_worker(task: tuple[str, str, str]) -> tuple[str, dict]:
     isrc, audio_path, labels_path = task
     from echora_kara.data import label_quality
+
     record = json.loads(Path(labels_path).read_text())
     try:
         score = label_quality.score_file(Path(audio_path), record["timings"])
     except Exception as error:  # noqa: BLE001 - recorded, never fatal for the build
-        score = {"method": label_quality.VERSION, "error": f"{type(error).__name__}: {error}", "score": None, "lines": []}
+        score = {
+            "method": label_quality.VERSION,
+            "error": f"{type(error).__name__}: {error}",
+            "score": None,
+            "lines": [],
+        }
     return isrc, score
 
 
 # ---------------------------------------------------------------------------------------------
 # Language identification
+
 
 def run_lid(todo: list[tuple[str, Path]], model: Path):
     """Yield lid_pass records (in-process); nothing when fastText is not installed."""
@@ -305,6 +360,7 @@ def run_lid(todo: list[tuple[str, Path]], model: Path):
         print("  LID skipped: fastText is not installed", file=sys.stderr, flush=True)
         return
     from echora_kara.data.lid_pass import identify_documents
+
     yield from identify_documents(model, todo)
 
 
@@ -318,12 +374,18 @@ def resolve_language(head: dict, lid: dict | None) -> dict:
         language, source = detected, "fasttext"
     elif detected and detected != language and confidence >= 0.8:
         language, source = detected, "fasttext_override"
-    return {"language": language, "language_source": source, "xml_lang": head["xml_lang"],
-            "lid_language": detected, "lid_confidence": confidence}
+    return {
+        "language": language,
+        "language_source": source,
+        "xml_lang": head["xml_lang"],
+        "lid_language": detected,
+        "lid_confidence": confidence,
+    }
 
 
 # ---------------------------------------------------------------------------------------------
 # Artists and splits
+
 
 def drop_near_duplicates(accepted: list[str], meta: dict, quality: dict) -> tuple[list[str], list[str]]:
     """One recording per (title, artist) whose durations agree within 1.5 s (remasters and
@@ -346,7 +408,10 @@ def drop_near_duplicates(accepted: list[str], meta: dict, quality: dict) -> tupl
         isrcs = sorted(isrcs, key=lambda i: meta[i]["probe"]["duration"])
         cluster = [isrcs[0]]
         for isrc in isrcs[1:] + [None]:
-            if isrc is not None and meta[isrc]["probe"]["duration"] - meta[cluster[-1]]["probe"]["duration"] < NEAR_DUPLICATE_SECONDS:
+            if (
+                isrc is not None
+                and meta[isrc]["probe"]["duration"] - meta[cluster[-1]]["probe"]["duration"] < NEAR_DUPLICATE_SECONDS
+            ):
                 cluster.append(isrc)
                 continue
             if len(cluster) > 1:
@@ -356,15 +421,19 @@ def drop_near_duplicates(accepted: list[str], meta: dict, quality: dict) -> tupl
 
 
 def credited_artists(artist: str) -> list[str]:
+    """Normalised credited artist keys of an artist string, split on ``ARTIST_SEPARATORS``, deduplicated in order."""
     names = [artist_key(name) for name in ARTIST_SEPARATORS.split(artist or "")]
     return [name for name in dict.fromkeys(names) if name]
 
 
 class Components:
+    """Union-find over artist keys; each component's root is its lexicographically smallest member."""
+
     def __init__(self):
         self.parent: dict[str, str] = {}
 
     def find(self, item: str) -> str:
+        """Root of ``item``'s component (registering it as a singleton if unseen), with path halving."""
         self.parent.setdefault(item, item)
         while self.parent[item] != item:
             self.parent[item] = self.parent[self.parent[item]]
@@ -372,6 +441,7 @@ class Components:
         return item
 
     def union(self, items: list[str]) -> None:
+        """Merge the components of all ``items`` into one."""
         for other in items[1:]:
             a, b = self.find(items[0]), self.find(other)
             if a != b:
@@ -379,12 +449,15 @@ class Components:
 
 
 def split_hash(component: str, seed: str) -> str:
+    """Deterministic split of an artist component: "validation" for ``VALIDATION_SHARE`` of the sha256 buckets of
+    ``seed:component``, else "train"."""
     value = int(hashlib.sha256(f"{seed}:{component}".encode()).hexdigest()[:12], 16) % 10000
     return "validation" if value < VALIDATION_SHARE * 10000 else "train"
 
 
 # ---------------------------------------------------------------------------------------------
 # Rows
+
 
 def slim_unit(unit: dict) -> dict:
     """Drop debug-only fields; everything the trainer, check_row and evaluators read stays."""
@@ -403,8 +476,22 @@ def finite(value):
     return value
 
 
-def prepared_row(isrc: str, meta: dict, labels: dict, probe: dict, identity: dict, split: str,
-                 artists: list[str], component: str, quality: dict | None, v2: dict | None = None) -> dict:
+def prepared_row(
+    isrc: str,
+    meta: dict,
+    labels: dict,
+    probe: dict,
+    identity: dict,
+    split: str,
+    artists: list[str],
+    component: str,
+    quality: dict | None,
+    v2: dict | None = None,
+) -> dict:
+    """Full manifest row (label schema 6, or 7 when ``v2`` holds the finalised policy-v2 labels) for one song.
+
+    Timings are clipped to the probed duration and flattened into ``alignment_tokens`` with vocabulary ids and their
+    line index; identity, language, normalizer and label-quality fields are copied from the inputs."""
     timings = [[slim_unit(u) for u in line] for line in (v2["timings"] if v2 else labels["timings"])]
     for line in timings:
         for unit in line:
@@ -416,22 +503,37 @@ def prepared_row(isrc: str, meta: dict, labels: dict, probe: dict, identity: dic
             flat.append({**unit, "line": line_index, "ids": [VOCAB[c] for c in unit["text"]]})
     track = meta["track"]
     return {
-        "id": isrc, "audio": track["audio"],
+        "id": isrc,
+        "audio": track["audio"],
         "audio_match_status": identity["audio_match_status"],
         **{k: identity[k] for k in ("requested_isrc", "matched_isrc") if identity.get(k)},
-        "audio_sha256": probe["sha256"], "duration": probe["duration"], "duration_source": "ffprobe_format",
-        "catalog_duration": track.get("duration"), "title": track.get("title"), "artist": track.get("artist"),
-        "artists": artists, "artist_key": component, "split": split,
+        "audio_sha256": probe["sha256"],
+        "duration": probe["duration"],
+        "duration_source": "ffprobe_format",
+        "catalog_duration": track.get("duration"),
+        "title": track.get("title"),
+        "artist": track.get("artist"),
+        "artists": artists,
+        "artist_key": component,
+        "split": split,
         "lyric_match_status": meta["lyric_match_status"],
         "source_timing_granularity": labels.get("timing_granularity") or "fragments",
         "measured_syllable_boundaries": False,
-        "language": labels["language"], "language_source": labels["language_source"], "xml_lang": labels["xml_lang"],
-        "lid_language": labels.get("lid_language"), "lid_confidence": labels.get("lid_confidence"),
-        "normalizer_language": labels["normalizer_language"], "normalizer": labels["normalizer"],
-        "timings": timings, "timing_units": labels["timing_units"],
-        "lyric_start": labels["lyric_start"], "lyric_end": round(max(u["end"] for line in timings for u in line), 3),
-        "alignment_tokens": flat, "line_transcripts": transcripts,
-        "tokenizer": "NextFire/mms-300m-ForcedAligner-karaoke-ja-Latn", "pad_token_id": VOCAB["[PAD]"],
+        "language": labels["language"],
+        "language_source": labels["language_source"],
+        "xml_lang": labels["xml_lang"],
+        "lid_language": labels.get("lid_language"),
+        "lid_confidence": labels.get("lid_confidence"),
+        "normalizer_language": labels["normalizer_language"],
+        "normalizer": labels["normalizer"],
+        "timings": timings,
+        "timing_units": labels["timing_units"],
+        "lyric_start": labels["lyric_start"],
+        "lyric_end": round(max(u["end"] for line in timings for u in line), 3),
+        "alignment_tokens": flat,
+        "line_transcripts": transcripts,
+        "tokenizer": "NextFire/mms-300m-ForcedAligner-karaoke-ja-Latn",
+        "pad_token_id": VOCAB["[PAD]"],
         "label_schema_version": 6,
         "supervision": "source-timed pronunciation characters; within-fragment boundaries are weak estimates",
         "label_quality": finite(quality),
@@ -445,16 +547,39 @@ def v2_row_fields(v2: dict, duration: float) -> dict:
     for unit in v2["background"]:
         if unit["start"] >= duration:
             continue
-        token = {k: unit[k] for k in ("start", "end", "text", "line", "lead_overlap", "phrase", "background_source",
-                                       "background_category", "tail_trim", "provider_end", "ignore") if k in unit}
+        token = {
+            k: unit[k]
+            for k in (
+                "start",
+                "end",
+                "text",
+                "line",
+                "lead_overlap",
+                "phrase",
+                "background_source",
+                "background_category",
+                "tail_trim",
+                "provider_end",
+                "ignore",
+            )
+            if k in unit
+        }
         token["end"] = min(token["end"], duration)
         token["ids"] = [] if unit.get("ignore") else [VOCAB[c] for c in unit["text"]]
-        token["source_spans"] = [{"start": span["start"], "end": min(span["end"], duration)} for span in unit.get("source_spans") or []]
+        token["source_spans"] = [
+            {"start": span["start"], "end": min(span["end"], duration)} for span in unit.get("source_spans") or []
+        ]
         if token["end"] > token["start"]:
             background.append(token)
-    return {"label_schema_version": 7, "label_rules": v2["rules"], "label_policy": v2["policy"],
-            "normalizer_language": v2["hint"], "label_policy_stats": v2["activity"], "line_repeat": v2["line_repeat"],
-            "background_tokens": background}
+    return {
+        "label_schema_version": 7,
+        "label_rules": v2["rules"],
+        "label_policy": v2["policy"],
+        "normalizer_language": v2["hint"],
+        "label_policy_stats": v2["activity"],
+        "line_repeat": v2["line_repeat"],
+        "background_tokens": background,
+    }
 
 
 def held_out_rows(path: Path | None, audio_root: Path, probes: dict, recordings: dict) -> tuple[list[dict], Counter]:
@@ -477,10 +602,17 @@ def held_out_rows(path: Path | None, audio_root: Path, probes: dict, recordings:
             # The held-out rows keep their artist strings; namespacing the key keeps check_row's
             # cross-split test from colliding with a train component that happens to be named
             # after a test artist's collaborator graph (its direct songs are excluded anyway).
-            row.update(audio=relative, audio_sha256=probe["sha256"], duration=probe["duration"],
-                       mix_audio=None, audio_source="mix", held_out_from=path.parent.name,
-                       artists=credited_artists(row.get("artist", "")), label_quality=None,
-                       artist_key=f"held_out:{row['artist_key']}")
+            row.update(
+                audio=relative,
+                audio_sha256=probe["sha256"],
+                duration=probe["duration"],
+                mix_audio=None,
+                audio_source="mix",
+                held_out_from=path.parent.name,
+                artists=credited_artists(row.get("artist", "")),
+                label_quality=None,
+                artist_key=f"held_out:{row['artist_key']}",
+            )
             row.pop("mix_audio")
             if any(u["end"] > probe["duration"] + 1e-6 for u in row["alignment_tokens"]):
                 skipped["test_lyrics_after_audio"] += 1
@@ -493,30 +625,89 @@ def compact_row(row: dict) -> dict:
     """Only what the trainer (train/targets, streams, overlap) and integrity.check_row read: identity,
     duration, per-token start/end/ids/ignore flags, the measured source fragment (region, edge-head
     starts) and the timings signature."""
-    keep_token = ("start", "end", "text", "ids", "ignore", "soft_ignore", "vocal_role", "line", "timing_method", "overlap")
+    keep_token = (
+        "start",
+        "end",
+        "text",
+        "ids",
+        "ignore",
+        "soft_ignore",
+        "vocal_role",
+        "line",
+        "timing_method",
+        "overlap",
+    )
     tokens = []
     for token in row["alignment_tokens"]:
         compact = {k: token[k] for k in keep_token if k in token}
         if token.get("source_spans"):
             compact["source_spans"] = [{"start": span["start"], "end": span["end"]} for span in token["source_spans"]]
         tokens.append(compact)
-    timings = [[{k: unit[k] for k in ("start", "end", "text", "ignore") if k in unit} for unit in line]
-               for line in row["timings"]]
+    timings = [
+        [{k: unit[k] for k in ("start", "end", "text", "ignore") if k in unit} for unit in line]
+        for line in row["timings"]
+    ]
     quality = row.get("label_quality") or {}
-    return {**{k: row[k] for k in ("id", "audio", "split", "artist_key", "audio_sha256", "audio_match_status",
-                                   "lyric_match_status", "duration", "duration_source", "language",
-                                   "label_schema_version", "pad_token_id", "line_transcripts") if k in row},
-            **{k: row[k] for k in ("requested_isrc", "matched_isrc") if row.get(k)},
-            "timings": timings, "alignment_tokens": tokens, "label_quality_score": quality.get("score"),
-            **({k: row[k] for k in ("label_rules", "label_policy", "line_repeat") if k in row}),
-            **({"background_tokens": [{k: t[k] for k in ("start", "end", "text", "ids", "ignore", "line", "lead_overlap",
-                                                         "background_category", "source_spans") if k in t}
-                                      for t in row["background_tokens"]]} if "background_tokens" in row else {}),
-            **({"offset_s": quality.get("offset_s"), "offset_flagged": quality.get("offset_flagged")} if "offset_s" in quality else {})}
+    return {
+        **{
+            k: row[k]
+            for k in (
+                "id",
+                "audio",
+                "split",
+                "artist_key",
+                "audio_sha256",
+                "audio_match_status",
+                "lyric_match_status",
+                "duration",
+                "duration_source",
+                "language",
+                "label_schema_version",
+                "pad_token_id",
+                "line_transcripts",
+            )
+            if k in row
+        },
+        **{k: row[k] for k in ("requested_isrc", "matched_isrc") if row.get(k)},
+        "timings": timings,
+        "alignment_tokens": tokens,
+        "label_quality_score": quality.get("score"),
+        **({k: row[k] for k in ("label_rules", "label_policy", "line_repeat") if k in row}),
+        **(
+            {
+                "background_tokens": [
+                    {
+                        k: t[k]
+                        for k in (
+                            "start",
+                            "end",
+                            "text",
+                            "ids",
+                            "ignore",
+                            "line",
+                            "lead_overlap",
+                            "background_category",
+                            "source_spans",
+                        )
+                        if k in t
+                    }
+                    for t in row["background_tokens"]
+                ]
+            }
+            if "background_tokens" in row
+            else {}
+        ),
+        **(
+            {"offset_s": quality.get("offset_s"), "offset_flagged": quality.get("offset_flagged")}
+            if "offset_s" in quality
+            else {}
+        ),
+    }
 
 
 # ---------------------------------------------------------------------------------------------
 # Main build
+
 
 def load_split_history(directory: Path) -> dict[str, str]:
     """Read actual song membership, not component names or JSON formatting."""
@@ -534,8 +725,9 @@ def load_split_history(directory: Path) -> dict[str, str]:
     return history
 
 
-def historical_component_split(component: str, songs: list[str], history: dict[str, str],
-                               assigned: str | None = None) -> str:
+def historical_component_split(
+    component: str, songs: list[str], history: dict[str, str], assigned: str | None = None
+) -> str:
     """Reject merged histories; new admissions are train-only, never new warm-start holdouts."""
     splits = {history[song] for song in songs if song in history}
     if len(splits) > 1 or "test" in splits:
@@ -557,7 +749,8 @@ def quarantine_validation_admissions(by_component, history, assignments):
     kept, quarantined = {}, []
     for component, songs in by_component.items():
         validation = assignments.get(component) == "validation" or any(
-            history.get(song) == "validation" for song in songs)
+            history.get(song) == "validation" for song in songs
+        )
         excluded = {song for song in songs if validation and song not in history}
         quarantined.extend(excluded)
         remaining = [song for song in songs if song not in excluded]
@@ -567,6 +760,7 @@ def quarantine_validation_admissions(by_component, history, assignments):
 
 
 def check_heldout_history(songs, history: dict[str, str], split: str) -> None:
+    """Raise ValueError when any of ``songs`` was in a different split than ``split`` in the historical build."""
     conflicts = sorted(song for song in songs if song in history and history[song] != split)
     if conflicts:
         raise ValueError(f"Historical songs moved to {split}: {conflicts[:10]}")
@@ -609,12 +803,13 @@ def load_activity_baseline(directory: Path) -> dict[str, str]:
 
 
 def check_baseline_activity(song: str, activity, baseline: dict) -> None:
+    """Raise ValueError when a song of the activity baseline lost its activity array or now loads it from another
+    source."""
     if song in baseline and (activity is None or activity["method"] != baseline[song]):
         raise ValueError(f"Baseline activity lost or source changed: {song} (expected {baseline[song]})")
 
 
-def activity_coverage(songs, directory: Path, loader, required: bool = False,
-                      baseline: dict | None = None) -> dict:
+def activity_coverage(songs, directory: Path, loader, required: bool = False, baseline: dict | None = None) -> dict:
     """Use the real loader so shared-store precedence and .npz caches agree with finalization."""
     baseline = baseline or {}
     songs = set(songs)
@@ -626,55 +821,105 @@ def activity_coverage(songs, directory: Path, loader, required: bool = False,
             missing.append(song)
         else:
             sources[activity["method"]] += 1
-    report = {"directory": str(directory), "required": required,
-              "baseline_covered": len(baseline), "baseline_retained": len(songs & baseline.keys()),
-              "baseline_not_emitted": len(baseline.keys() - songs),
-              "available": sum(sources.values()), "missing": len(missing),
-              "missing_sample": missing[:20], "sources": dict(sources)}
+    report = {
+        "directory": str(directory),
+        "required": required,
+        "baseline_covered": len(baseline),
+        "baseline_retained": len(songs & baseline.keys()),
+        "baseline_not_emitted": len(baseline.keys() - songs),
+        "available": sum(sources.values()),
+        "missing": len(missing),
+        "missing_sample": missing[:20],
+        "sources": dict(sources),
+    }
     if required and missing:
         raise ValueError(f"Required activity missing: {json.dumps(report)}")
     return report
 
 
 def main() -> None:
+    """Build or incrementally update the manifest: full rows, ``compact/`` trainer rows, ``vocab.json``,
+    ``split_assignments.json`` and ``summary.json`` under ``--output``.
+
+    Per-song labels, audio probes, language ids and label-quality scores are cached under ``--cache-dir`` and reused
+    when their content keys match; see the module docstring for the inputs and the v2 options."""
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--index", type=Path, required=True, help="recordings JSONL (see the input layout above)")
     parser.add_argument("--audio-root", type=Path, required=True, help="root of the index's audio paths")
     parser.add_argument("--output", type=Path, required=True, help="manifest directory (created; re-runs update it)")
     parser.add_argument("--cache-dir", type=Path, help="per-song caches (default: <output>/cache)")
-    parser.add_argument("--held-out-test", type=Path,
-                        help="frozen prepared test.jsonl: its songs and artists are excluded from train/validation")
+    parser.add_argument(
+        "--held-out-test",
+        type=Path,
+        help="frozen prepared test.jsonl: its songs and artists are excluded from train/validation",
+    )
     parser.add_argument("--workers", type=int, default=max(4, (os.cpu_count() or 8) // 2))
     parser.add_argument("--limit", type=int, help="only the first N documents with audio (smoke runs)")
     parser.add_argument("--languages", nargs="*", help="restrict to these document languages")
     parser.add_argument("--no-label-quality", action="store_true", help="skip the label-quality score (faster)")
-    parser.add_argument("--min-label-quality", type=float,
-                        help="opt-in: drop songs whose label_quality.score is below this (default keeps all)")
+    parser.add_argument(
+        "--min-label-quality",
+        type=float,
+        help="opt-in: drop songs whose label_quality.score is below this (default keeps all)",
+    )
     parser.add_argument("--seed", default="karaoke", help="split hash seed prefix (keep fixed across re-runs)")
     parser.add_argument("--validation-share", type=float, default=VALIDATION_SHARE)
-    parser.add_argument("--search-seeds", type=int, default=2000,
-                        help="candidate split seeds searched on the first run (size and language balance)")
+    parser.add_argument(
+        "--search-seeds",
+        type=int,
+        default=2000,
+        help="candidate split seeds searched on the first run (size and language balance)",
+    )
     parser.add_argument("--lid-model", type=Path, help="fastText lid.176 model; without it no language id runs")
     # Label round v2. Defaults build v1 labels.
-    parser.add_argument("--label-rules", choices=("v1", "v2", "v2-orthographic", "v3", "v3-orthographic", "v3-sung"), default="v1",
-                        help="shared normalizer rules (label_rules.py); v2 must ship with a v2-trained model")
-    parser.add_argument("--label-policy", choices=("v1", "v2"), default="v1",
-                        help="v2: label_policy + tail trim from the activity arrays; label schema 7")
-    parser.add_argument("--activity-dir", type=Path,
-                        help="vocal_activity.py store or .npz arrays (default: <cache-dir>/activity)")
-    parser.add_argument("--require-activity", action="store_true",
-                        help="strict guard: require loadable activity for every emitted train/validation song (policy v2)")
-    parser.add_argument("--activity-baseline", type=Path,
-                        help="prior policy-v2 full manifest directory; preserve retained songs’ activity sources")
-    parser.add_argument("--reference-labels", type=Path,
-                        help="labels cache whose timings label quality and the offset search are scored on; "
-                             "documents without a reference label are not built")
-    parser.add_argument("--split-assignments-from", type=Path,
-                        help="copy this split_assignments.json into a new output (keeps an earlier build's artist split)")
-    parser.add_argument("--offset-gate", choices=("record", "drop"), default="record",
-                        help="drop: songs with a confirmed whole-song offset, and live/remaster/edit titles with a flagged one")
-    parser.add_argument("--near-duplicates", choices=("keep", "drop"), default="keep",
-                        help="drop: keep one recording per (title, artist, duration within 1.5 s) group")
+    parser.add_argument(
+        "--label-rules",
+        choices=("v1", "v2", "v2-orthographic", "v3", "v3-orthographic", "v3-sung"),
+        default="v1",
+        help="shared normalizer rules (label_rules.py); v2 must ship with a v2-trained model",
+    )
+    parser.add_argument(
+        "--label-policy",
+        choices=("v1", "v2"),
+        default="v1",
+        help="v2: label_policy + tail trim from the activity arrays; label schema 7",
+    )
+    parser.add_argument(
+        "--activity-dir", type=Path, help="vocal_activity.py store or .npz arrays (default: <cache-dir>/activity)"
+    )
+    parser.add_argument(
+        "--require-activity",
+        action="store_true",
+        help="strict guard: require loadable activity for every emitted train/validation song (policy v2)",
+    )
+    parser.add_argument(
+        "--activity-baseline",
+        type=Path,
+        help="prior policy-v2 full manifest directory; preserve retained songs’ activity sources",
+    )
+    parser.add_argument(
+        "--reference-labels",
+        type=Path,
+        help="labels cache whose timings label quality and the offset search are scored on; "
+        "documents without a reference label are not built",
+    )
+    parser.add_argument(
+        "--split-assignments-from",
+        type=Path,
+        help="copy this split_assignments.json into a new output (keeps an earlier build's artist split)",
+    )
+    parser.add_argument(
+        "--offset-gate",
+        choices=("record", "drop"),
+        default="record",
+        help="drop: songs with a confirmed whole-song offset, and live/remaster/edit titles with a flagged one",
+    )
+    parser.add_argument(
+        "--near-duplicates",
+        choices=("keep", "drop"),
+        default="keep",
+        help="drop: keep one recording per (title, artist, duration within 1.5 s) group",
+    )
     args = parser.parse_args()
     if (args.require_activity or args.activity_baseline) and args.label_policy != "v2":
         parser.error("Activity guards require --label-policy v2")
@@ -728,7 +973,7 @@ def main() -> None:
     todo = []
     if v2_build:
         todo = v2_label_tasks(documents, caches, args)
-    for isrc, doc in ([] if v2_build else documents.items()):
+    for isrc, doc in [] if v2_build else documents.items():
         cached = caches / "labels" / f"{isrc}.json"
         doc["labels_path"] = cached
         if cached.exists():
@@ -740,7 +985,10 @@ def main() -> None:
             except (ValueError, KeyError, OSError):
                 pass
         todo.append((isrc, str(doc["path"])))
-    print(f"normalizing {len(todo)} documents ({len(documents) - len(todo)} cached) with {args.workers} workers", flush=True)
+    print(
+        f"normalizing {len(todo)} documents ({len(documents) - len(todo)} cached) with {args.workers} workers",
+        flush=True,
+    )
     if todo:
         with Pool(args.workers, initializer=_init_worker, initargs=(args.label_rules, args.label_policy)) as pool:
             for count, (isrc, record) in enumerate(pool.imap_unordered(normalize_document, todo, chunksize=4), 1):
@@ -769,7 +1017,9 @@ def main() -> None:
     probe_cache_path = caches / "audio_probe.jsonl"
     probes = {record["key"]: record for record in read_jsonl_cache(probe_cache_path).values()}
     probe_todo = []
-    for isrc in list(documents) + [json.loads(l)["id"] for l in held_out_test.open()] if held_out_test else list(documents):
+    for isrc in (
+        list(documents) + [json.loads(l)["id"] for l in held_out_test.open()] if held_out_test else list(documents)
+    ):
         audio = audio_root / audio_path(isrc, recordings)
         if not audio.exists():
             continue
@@ -806,7 +1056,10 @@ def main() -> None:
             rejected["ffprobe_failed"] += 1
             continue
         identity = audio_identity(isrc, track)
-        if identity["audio_match_status"] == "exact_isrc" and identity.get("index_sha256") not in (None, probe["sha256"]):
+        if identity["audio_match_status"] == "exact_isrc" and identity.get("index_sha256") not in (
+            None,
+            probe["sha256"],
+        ):
             identity = {"audio_match_status": "unverified_legacy"}
         if identity["audio_match_status"] == "isrc_mismatch":
             rejected["known_wrong_recording"] += 1
@@ -819,7 +1072,11 @@ def main() -> None:
             continue
         catalog = track.get("duration")
         limit = MAX_CATALOG_DURATION_DIFF.get(identity["audio_match_status"], 2.0)
-        if not isinstance(catalog, (int, float)) or not math.isfinite(catalog) or abs(probe["duration"] - catalog) > limit:
+        if (
+            not isinstance(catalog, (int, float))
+            or not math.isfinite(catalog)
+            or abs(probe["duration"] - catalog) > limit
+        ):
             rejected["catalog_duration_mismatch"] += 1
             continue
         if record["lyric_end"] > probe["duration"] + TOLERANCE_SECONDS:
@@ -832,9 +1089,13 @@ def main() -> None:
         if not artists:
             rejected["artist_missing"] += 1
             continue
-        meta[isrc] = {"track": track, "identity": identity, "probe": probe, "artists": artists,
-                      "lyric_match_status": "exact_isrc" if track.get("lyric_match_status") == "exact_isrc"
-                      else UNVERIFIED_LYRIC}
+        meta[isrc] = {
+            "track": track,
+            "identity": identity,
+            "probe": probe,
+            "artists": artists,
+            "lyric_match_status": "exact_isrc" if track.get("lyric_match_status") == "exact_isrc" else UNVERIFIED_LYRIC,
+        }
         labels[isrc] = record
         accepted.append(isrc)
     # Exact duplicate audio content: keep none (as curate.py).
@@ -847,19 +1108,25 @@ def main() -> None:
     quality: dict[str, dict] = {}
     if not args.no_label_quality:
         from echora_kara.data import label_quality
+
         quality_todo = []
         reference_keys = {}
         if args.reference_labels:
             # Scored on the reference timings, which the 0.05 threshold and the offset gate were
             # calibrated on.
-            tasks = [(isrc, str(args.reference_labels / f"{isrc}.json"), meta[isrc]["probe"]["sha256"]) for isrc in accepted]
+            tasks = [
+                (isrc, str(args.reference_labels / f"{isrc}.json"), meta[isrc]["probe"]["sha256"]) for isrc in accepted
+            ]
             with Pool(args.workers) as pool:
                 for isrc, key in pool.imap_unordered(_reference_quality_key, tasks, chunksize=16):
                     reference_keys[isrc] = key
         for isrc in accepted:
             cached = caches / "quality" / f"{isrc}.json"
-            key = (reference_keys.get(isrc) if args.reference_labels
-                   else f"{meta[isrc]['probe']['sha256']}:{labels[isrc]['key']}:{label_quality.VERSION}")
+            key = (
+                reference_keys.get(isrc)
+                if args.reference_labels
+                else f"{meta[isrc]['probe']['sha256']}:{labels[isrc]['key']}:{label_quality.VERSION}"
+            )
             if cached.exists():
                 try:
                     record = json.loads(cached.read_text())
@@ -868,9 +1135,16 @@ def main() -> None:
                         continue
                 except (ValueError, OSError):
                     pass
-            quality_todo.append((isrc, str(audio_root / recordings[isrc]["audio"]),
-                                 str(args.reference_labels / f"{isrc}.json") if args.reference_labels
-                                 else str(documents[isrc]["labels_path"]), key))
+            quality_todo.append(
+                (
+                    isrc,
+                    str(audio_root / recordings[isrc]["audio"]),
+                    str(args.reference_labels / f"{isrc}.json")
+                    if args.reference_labels
+                    else str(documents[isrc]["labels_path"]),
+                    key,
+                )
+            )
         print(f"scoring label quality for {len(quality_todo)} songs ({len(quality)} cached)", flush=True)
         if quality_todo:
             with Pool(args.workers) as pool:
@@ -882,8 +1156,12 @@ def main() -> None:
                     if count % 1000 == 0:
                         print(f"  scored {count}/{len(quality_todo)} ({time.time() - started:.0f}s)", flush=True)
         if args.min_label_quality is not None:
-            low = [isrc for isrc in accepted if (quality.get(isrc) or {}).get("score") is not None
-                   and quality[isrc]["score"] < args.min_label_quality]
+            low = [
+                isrc
+                for isrc in accepted
+                if (quality.get(isrc) or {}).get("score") is not None
+                and quality[isrc]["score"] < args.min_label_quality
+            ]
             rejected["label_quality_below_threshold"] += len(low)
             accepted = [isrc for isrc in accepted if isrc not in set(low)]
     gate_ids: dict[str, list[str]] = defaultdict(list)
@@ -946,9 +1224,14 @@ def main() -> None:
         gate_ids["new_admission_in_historical_validation_component"] = quarantined
         print(f"quarantined {len(quarantined)} new admissions in historical validation components", flush=True)
 
-    verified_isrc = {isrc: identity_problem({"id": isrc, **meta[isrc]["identity"],
-                                             "lyric_match_status": meta[isrc]["lyric_match_status"]}, "validation") is None
-                     for isrcs in by_component.values() for isrc in isrcs}
+    verified_isrc = {
+        isrc: identity_problem(
+            {"id": isrc, **meta[isrc]["identity"], "lyric_match_status": meta[isrc]["lyric_match_status"]}, "validation"
+        )
+        is None
+        for isrcs in by_component.values()
+        for isrc in isrcs
+    }
 
     def verified(isrc: str) -> bool:
         return verified_isrc[isrc]
@@ -1000,7 +1283,9 @@ def main() -> None:
             if split == "validation" and not verified(isrc):
                 rejected["validation_identity_unverified"] += 1
                 continue
-            if split == "train" and identity_problem({"id": isrc, **meta[isrc]["identity"], "lyric_match_status": "exact_isrc"}, "train"):
+            if split == "train" and identity_problem(
+                {"id": isrc, **meta[isrc]["identity"], "lyric_match_status": "exact_isrc"}, "train"
+            ):
                 rejected["unknown_identity_status"] += 1
                 continue
             split_of[isrc] = split
@@ -1008,21 +1293,37 @@ def main() -> None:
     activity_report = None
     if args.label_policy == "v2":
         from echora_kara.data.vocal_activity import load_activity_from
-        activity_report = activity_coverage(split_of, activity_root, load_activity_from, args.require_activity, activity_baseline)
+
+        activity_report = activity_coverage(
+            split_of, activity_root, load_activity_from, args.require_activity, activity_baseline
+        )
         activity_report["baseline"] = str(args.activity_baseline) if args.activity_baseline else None
         print("activity coverage: " + json.dumps(activity_report), flush=True)
         if activity_report["missing"]:
-            print("WARNING: missing activity; tail trim disabled for those songs. "
-                  "Use --activity-baseline to preserve prior coverage or --require-activity for full coverage.", file=sys.stderr)
+            print(
+                "WARNING: missing activity; tail trim disabled for those songs. "
+                "Use --activity-baseline to preserve prior coverage or --require-activity for full coverage.",
+                file=sys.stderr,
+            )
     if history is not None:
-        check_heldout_history((song for song, split in split_of.items() if split == "validation"), history, "validation")
-    assignments = {"_seed": seed, **{component: split for component, split in fixed.items()},
-                   **{component: "train" for component in held_components}}
+        check_heldout_history(
+            (song for song, split in split_of.items() if split == "validation"), history, "validation"
+        )
+    assignments = {
+        "_seed": seed,
+        **{component: split for component, split in fixed.items()},
+        **{component: "train" for component in held_components},
+    }
     assignments_path.write_text(json.dumps(assignments, ensure_ascii=False, indent=0, sort_keys=True))
 
     # 7. Write manifests and check every row structurally.
     checks = new_assignments()
-    counts, languages, mask_reasons, errors = Counter(), {s: Counter() for s in ("train", "validation", "test")}, Counter(), []
+    counts, languages, mask_reasons, errors = (
+        Counter(),
+        {s: Counter() for s in ("train", "validation", "test")},
+        Counter(),
+        [],
+    )
     quality_scores = {s: [] for s in ("train", "validation")}
     seconds = Counter()
     trim_stats, trim_seconds = Counter(), Counter()
@@ -1030,7 +1331,10 @@ def main() -> None:
     policy_counts = {s: defaultdict(Counter) for s in ("train", "validation")}
     activity_root = args.activity_dir or (caches / "activity")
     for split in ("train", "validation"):
-        with (output / f"{split}.jsonl").open("w") as sink, (output / "compact" / f"{split}.jsonl").open("w") as compact_sink:
+        with (
+            (output / f"{split}.jsonl").open("w") as sink,
+            (output / "compact" / f"{split}.jsonl").open("w") as compact_sink,
+        ):
             for isrc in accepted:
                 if split_of.get(isrc) != split:
                     continue
@@ -1041,6 +1345,7 @@ def main() -> None:
                     if args.label_policy == "v2":
                         from echora_kara.data import label_policy as label_policy_v2
                         from echora_kara.data.vocal_activity import load_activity_from
+
                         activity = load_activity_from(activity_root, isrc)
                         check_baseline_activity(isrc, activity, activity_baseline)
                         if args.require_activity and activity is None:
@@ -1048,14 +1353,36 @@ def main() -> None:
                         timings, background, trim = label_policy_v2.finalize(timings, activity)
                         trim_stats[trim["activity"]] += 1
                         trim_seconds[trim["activity"]] += trim.get("tail_seconds_trimmed", 0.0)
-                        for key in ("background_phrases_sequential", "background_phrases_simultaneous",
-                                    "background_units_sequential", "background_units_simultaneous",
-                                    "lead_overlaps", "lead_overlaps_trimmed"):
+                        for key in (
+                            "background_phrases_sequential",
+                            "background_phrases_simultaneous",
+                            "background_units_sequential",
+                            "background_units_simultaneous",
+                            "lead_overlaps",
+                            "lead_overlaps_trimmed",
+                        ):
                             policy_counts[split][labels[isrc]["language"]][key] += trim.get(key, 0)
-                    v2 = {"timings": timings, "background": background, "activity": trim, "rules": args.label_rules,
-                          "policy": args.label_policy, "hint": record["normalizer_language"], "line_repeat": record.get("line_repeat")}
-                row = prepared_row(isrc, meta[isrc], record, meta[isrc]["probe"], meta[isrc]["identity"], split,
-                                   meta[isrc]["artists"], meta[isrc]["component"], quality.get(isrc), v2)
+                    v2 = {
+                        "timings": timings,
+                        "background": background,
+                        "activity": trim,
+                        "rules": args.label_rules,
+                        "policy": args.label_policy,
+                        "hint": record["normalizer_language"],
+                        "line_repeat": record.get("line_repeat"),
+                    }
+                row = prepared_row(
+                    isrc,
+                    meta[isrc],
+                    record,
+                    meta[isrc]["probe"],
+                    meta[isrc]["identity"],
+                    split,
+                    meta[isrc]["artists"],
+                    meta[isrc]["component"],
+                    quality.get(isrc),
+                    v2,
+                )
                 try:
                     check_row(row, split, checks, audio_root, prepared=True)
                 except ValueError as error:
@@ -1076,10 +1403,15 @@ def main() -> None:
                 if "background_tokens" in row:
                     supervised = [t for t in row["background_tokens"] if not t.get("ignore")]
                     background_counts[split]["background_head_units"] += len(supervised)
-                    background_counts[split]["background_head_units_under_lead"] += sum(1 for t in supervised if t.get("lead_overlap", 0) > 0)
+                    background_counts[split]["background_head_units_under_lead"] += sum(
+                        1 for t in supervised if t.get("lead_overlap", 0) > 0
+                    )
                     background_counts[split]["main_head_background_soft_masked"] += sum(
-                        1 for t in row["alignment_tokens"] if t.get("vocal_role") == "background" and t.get("ignore"))
-                    background_counts[split]["background_head_seconds"] += sum(t["end"] - t["start"] for t in row["background_tokens"])
+                        1 for t in row["alignment_tokens"] if t.get("vocal_role") == "background" and t.get("ignore")
+                    )
+                    background_counts[split]["background_head_seconds"] += sum(
+                        t["end"] - t["start"] for t in row["background_tokens"]
+                    )
     test_rows, test_skipped = held_out_rows(held_out_test, audio_root, probes, recordings)
     with (output / "test.jsonl").open("w") as sink, (output / "compact" / "test.jsonl").open("w") as compact_sink:
         for row in test_rows:
@@ -1100,57 +1432,116 @@ def main() -> None:
         if not values:
             return None
         values = sorted(values)
-        return {f"p{p}": round(values[min(len(values) - 1, int(p / 100 * len(values)))], 4) for p in (5, 10, 25, 50, 75, 90)}
+        return {
+            f"p{p}": round(values[min(len(values) - 1, int(p / 100 * len(values)))], 4) for p in (5, 10, 25, 50, 75, 90)
+        }
+
     summary = {
-        "builder": BUILDER_VERSION, "normalizer": NORMALIZER_VERSION, "built_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        "audio_root": str(audio_root), "audio_layout": "<audio-root>/<index audio path> (full mixes)", "label_schema_version": 6,
-        "splits": {s: counts[s] for s in ("train", "validation", "test")}, "total": sum(counts.values()),
+        "builder": BUILDER_VERSION,
+        "normalizer": NORMALIZER_VERSION,
+        "built_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "audio_root": str(audio_root),
+        "audio_layout": "<audio-root>/<index audio path> (full mixes)",
+        "label_schema_version": 6,
+        "splits": {s: counts[s] for s in ("train", "validation", "test")},
+        "total": sum(counts.values()),
         "supervised_hours": {s: round(seconds[s] / 3600, 2) for s in ("train", "validation")},
         "languages": {s: dict(languages[s].most_common()) for s in languages},
-        "index": str(args.index.resolve()), "documents_cached": len(recordings), "documents_with_audio": len(documents),
-        "rejected": dict(rejected.most_common()), "test_skipped": dict(test_skipped),
+        "index": str(args.index.resolve()),
+        "documents_cached": len(recordings),
+        "documents_with_audio": len(documents),
+        "rejected": dict(rejected.most_common()),
+        "test_skipped": dict(test_skipped),
         "mask_reasons": dict(mask_reasons.most_common()),
-        "label_quality": {"method": None if args.no_label_quality else "label_quality_mfcc_v1",
-                          "filter_threshold": args.min_label_quality,
-                          "score_percentiles": {s: percentiles(v) for s, v in quality_scores.items()}},
+        "label_quality": {
+            "method": None if args.no_label_quality else "label_quality_mfcc_v1",
+            "filter_threshold": args.min_label_quality,
+            "score_percentiles": {s: percentiles(v) for s, v in quality_scores.items()},
+        },
         "split_method": f"95/5 by connected components of credited artists, sha256 seed {args.seed!r}; "
-                        "assignments persisted in split_assignments.json; songs crediting a held-out test artist excluded, "
-                        "their wider components train-only",
+        "assignments persisted in split_assignments.json; songs crediting a held-out test artist excluded, "
+        "their wider components train-only",
         "activity": activity_report,
         "split_history": str(history_root) if history is not None else None,
-        "held_out": {"source": str(held_out_test) if held_out_test else None, "songs": len(held_isrcs), "artists": len(held_artists)},
-        "constraints": {"max_label_chars": MAX_LABEL_CHARS, "min_units": MIN_UNITS, "min_lyric_coverage": MIN_COVERAGE,
-                        "max_catalog_duration_diff_seconds": MAX_CATALOG_DURATION_DIFF, "artist_disjoint": True},
+        "held_out": {
+            "source": str(held_out_test) if held_out_test else None,
+            "songs": len(held_isrcs),
+            "artists": len(held_artists),
+        },
+        "constraints": {
+            "max_label_chars": MAX_LABEL_CHARS,
+            "min_units": MIN_UNITS,
+            "min_lyric_coverage": MIN_COVERAGE,
+            "max_catalog_duration_diff_seconds": MAX_CATALOG_DURATION_DIFF,
+            "artist_disjoint": True,
+        },
         "language_sources": dict(Counter(labels[isrc]["language_source"] for isrc in split_of)),
         "manifest_bytes": {name: (output / f"{name}.jsonl").stat().st_size for name in ("train", "validation", "test")},
-        "compact_manifest_bytes": {name: (output / "compact" / f"{name}.jsonl").stat().st_size for name in ("train", "validation", "test")},
-        "integrity_errors": errors[:50], "elapsed_seconds": round(time.time() - started),
+        "compact_manifest_bytes": {
+            name: (output / "compact" / f"{name}.jsonl").stat().st_size for name in ("train", "validation", "test")
+        },
+        "integrity_errors": errors[:50],
+        "elapsed_seconds": round(time.time() - started),
     }
     if v2_build:
         from echora_kara.text.normalization import normalizer_version
         from echora_kara.text import label_rules as label_rules_module
-        summary.update({
-            "builder": BUILDER_VERSION_V2, "normalizer": normalizer_version(args.label_rules), "label_schema_version": 7,
-            "label_rules": args.label_rules, "label_policy": args.label_policy, "espeak_ng": label_rules_module.espeak_version(),
-            "reference_labels": str(args.reference_labels) if args.reference_labels else None,
-            "label_quality": {**summary["label_quality"], "method": "label_quality_mfcc_v2 on the reference labels"
-                              if args.reference_labels else "label_quality_mfcc_v2"},
-            "gates": {"offset_gate": args.offset_gate, "near_duplicates": args.near_duplicates,
-                      **{reason: len(isrcs) for reason, isrcs in gate_ids.items()}},
-            "tail_trim": {"songs_by_activity_source": {str(k): v for k, v in trim_stats.items()},
-                          "seconds_trimmed_by_source": {str(k): round(v, 1) for k, v in trim_seconds.items()}},
-            "background_head": {split: {k: round(v, 1) for k, v in counts.items()} for split, counts in background_counts.items()},
-            "label_policy_counts": {split: {language: dict(c) for language, c in sorted(by.items(), key=lambda kv: -sum(kv[1].values()))}
-                                    for split, by in policy_counts.items()},
-        })
+
+        summary.update(
+            {
+                "builder": BUILDER_VERSION_V2,
+                "normalizer": normalizer_version(args.label_rules),
+                "label_schema_version": 7,
+                "label_rules": args.label_rules,
+                "label_policy": args.label_policy,
+                "espeak_ng": label_rules_module.espeak_version(),
+                "reference_labels": str(args.reference_labels) if args.reference_labels else None,
+                "label_quality": {
+                    **summary["label_quality"],
+                    "method": "label_quality_mfcc_v2 on the reference labels"
+                    if args.reference_labels
+                    else "label_quality_mfcc_v2",
+                },
+                "gates": {
+                    "offset_gate": args.offset_gate,
+                    "near_duplicates": args.near_duplicates,
+                    **{reason: len(isrcs) for reason, isrcs in gate_ids.items()},
+                },
+                "tail_trim": {
+                    "songs_by_activity_source": {str(k): v for k, v in trim_stats.items()},
+                    "seconds_trimmed_by_source": {str(k): round(v, 1) for k, v in trim_seconds.items()},
+                },
+                "background_head": {
+                    split: {k: round(v, 1) for k, v in counts.items()} for split, counts in background_counts.items()
+                },
+                "label_policy_counts": {
+                    split: {
+                        language: dict(c) for language, c in sorted(by.items(), key=lambda kv: -sum(kv[1].values()))
+                    }
+                    for split, by in policy_counts.items()
+                },
+            }
+        )
         (output / "gates").mkdir(exist_ok=True)
         for reason, isrcs in gate_ids.items():
             (output / "gates" / f"{reason}.txt").write_text("".join(f"{isrc}\n" for isrc in sorted(isrcs)))
     (output / "summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2) + "\n")
-    (output / "compact" / "summary.json").write_text(json.dumps(
-        {**summary, "note": "compact manifest for training: trainer-read fields only; full rows in the parent directory"},
-        ensure_ascii=False, indent=2) + "\n")
-    print(json.dumps({k: v for k, v in summary.items() if k not in ("languages", "mask_reasons")}, ensure_ascii=False, indent=1))
+    (output / "compact" / "summary.json").write_text(
+        json.dumps(
+            {
+                **summary,
+                "note": "compact manifest for training: trainer-read fields only; full rows in the parent directory",
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n"
+    )
+    print(
+        json.dumps(
+            {k: v for k, v in summary.items() if k not in ("languages", "mask_reasons")}, ensure_ascii=False, indent=1
+        )
+    )
     print("languages:", json.dumps(summary["languages"], ensure_ascii=False))
 
 

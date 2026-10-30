@@ -37,28 +37,106 @@ _LETTERS = re.compile(r"[^a-z]")
 # Mandarin
 
 _MANDARIN_INITIALS = {
-    "b": "b", "p": "p", "m": "m", "f": "f", "d": "d", "t": "t", "n": "n", "l": "l",
-    "g": "g", "k": "k", "h": "h", "j": "j", "q": "ch", "x": "sh",
-    "zh": "j", "ch": "ch", "sh": "sh", "r": "r", "z": "z", "c": "ts", "s": "s",
+    "b": "b",
+    "p": "p",
+    "m": "m",
+    "f": "f",
+    "d": "d",
+    "t": "t",
+    "n": "n",
+    "l": "l",
+    "g": "g",
+    "k": "k",
+    "h": "h",
+    "j": "j",
+    "q": "ch",
+    "x": "sh",
+    "zh": "j",
+    "ch": "ch",
+    "sh": "sh",
+    "r": "r",
+    "z": "z",
+    "c": "ts",
+    "s": "s",
 }
 # Finals after an initial. ``v`` is pypinyin's ü.
 _MANDARIN_FINALS = {
-    "a": "a", "o": "o", "e": "e", "i": "i", "u": "u", "v": "yu", "ê": "e",
-    "ai": "ai", "ei": "ei", "ao": "ao", "ou": "ou", "an": "an", "en": "en",
-    "ang": "ang", "eng": "eng", "ong": "ong", "er": "er",
-    "ia": "ia", "ie": "ie", "iao": "iao", "iu": "iou", "ian": "ien", "in": "in",
-    "iang": "iang", "ing": "ing", "iong": "iong",
-    "ua": "ua", "uo": "uo", "uai": "uai", "ui": "uei", "uan": "uan", "un": "uen",
-    "uang": "uang", "ueng": "ueng", "ve": "yue", "van": "yuen", "vn": "yun",
+    "a": "a",
+    "o": "o",
+    "e": "e",
+    "i": "i",
+    "u": "u",
+    "v": "yu",
+    "ê": "e",
+    "ai": "ai",
+    "ei": "ei",
+    "ao": "ao",
+    "ou": "ou",
+    "an": "an",
+    "en": "en",
+    "ang": "ang",
+    "eng": "eng",
+    "ong": "ong",
+    "er": "er",
+    "ia": "ia",
+    "ie": "ie",
+    "iao": "iao",
+    "iu": "iou",
+    "ian": "ien",
+    "in": "in",
+    "iang": "iang",
+    "ing": "ing",
+    "iong": "iong",
+    "ua": "ua",
+    "uo": "uo",
+    "uai": "uai",
+    "ui": "uei",
+    "uan": "uan",
+    "un": "uen",
+    "uang": "uang",
+    "ueng": "ueng",
+    "ve": "yue",
+    "van": "yuen",
+    "vn": "yun",
 }
 # Whole syllables without an initial (pinyin already writes the glide) and the apical vowels.
 _MANDARIN_SYLLABLES = {
-    "yi": "i", "ya": "ya", "yan": "yen", "yang": "yang", "yao": "yao", "ye": "ye", "yin": "in",
-    "ying": "ing", "yo": "yo", "yong": "yong", "you": "you", "yu": "yu", "yuan": "yuen",
-    "yue": "yue", "yun": "yun", "wu": "u", "wa": "wa", "wai": "wai", "wan": "wan", "wang": "wang",
-    "wei": "wei", "wen": "wen", "weng": "weng", "wo": "wo",
-    "zhi": "jr", "chi": "chr", "shi": "shr", "ri": "r", "zi": "zi", "ci": "tsi", "si": "si",
-    "m": "m", "n": "n", "ng": "ng", "hm": "hm", "hng": "hng",
+    "yi": "i",
+    "ya": "ya",
+    "yan": "yen",
+    "yang": "yang",
+    "yao": "yao",
+    "ye": "ye",
+    "yin": "in",
+    "ying": "ing",
+    "yo": "yo",
+    "yong": "yong",
+    "you": "you",
+    "yu": "yu",
+    "yuan": "yuen",
+    "yue": "yue",
+    "yun": "yun",
+    "wu": "u",
+    "wa": "wa",
+    "wai": "wai",
+    "wan": "wan",
+    "wang": "wang",
+    "wei": "wei",
+    "wen": "wen",
+    "weng": "weng",
+    "wo": "wo",
+    "zhi": "jr",
+    "chi": "chr",
+    "shi": "shr",
+    "ri": "r",
+    "zi": "zi",
+    "ci": "tsi",
+    "si": "si",
+    "m": "m",
+    "n": "n",
+    "ng": "ng",
+    "hm": "hm",
+    "hng": "hng",
 }
 _JQX_FINALS = {"u": "yu", "ue": "yue", "uan": "yuen", "un": "yun"}
 
@@ -71,7 +149,7 @@ def pinyin_to_label(pinyin: str) -> str:
     if syllable in _MANDARIN_SYLLABLES:
         return _MANDARIN_SYLLABLES[syllable]
     initial = next((i for i in ("zh", "ch", "sh", *"bpmfdtnlgkhjqxrzcs") if syllable.startswith(i)), "")
-    final = syllable[len(initial):]
+    final = syllable[len(initial) :]
     if not initial:
         return _MANDARIN_FINALS.get(final, "") if final and final[0] in "aoeê" else ""
     if initial in ("j", "q", "x") and final in _JQX_FINALS:
@@ -88,14 +166,14 @@ def _simplified(text: str) -> str:
     converter = _simplified.__dict__.setdefault("converter", opencc.OpenCC("t2s"))
     converted = converter.convert(text)
     if len(converted) != len(text):
-        converted = "".join(converter.convert(char) if len(converter.convert(char)) == 1 else char
-                            for char in text)
+        converted = "".join(converter.convert(char) if len(converter.convert(char)) == 1 else char for char in text)
     return converted if len(converted) == len(text) else text
 
 
 def mandarin_readings(text: str) -> list[str]:
     """One label per character of a Han run (phrase-level heteronym choice), '' when unknown."""
     from pypinyin import Style, pinyin
+
     readings = pinyin(_simplified(text), style=Style.TONE3, heteronym=False)
     if len(readings) != len(text):
         return [""] * len(text)
@@ -111,6 +189,8 @@ CANTONESE_MARKERS = frozenset("嘅唔佢咗哋嘢冇噉啲乜嗰喺畀攞咁嚟�
 
 
 def jyutping_to_label(jyutping: str, v2: bool = False) -> str:
+    """Acoustic label of one Jyutping syllable: tone digits dropped, initial j -> y and c -> ts (v2: jyu -> yu); ''
+    unless the result is a-z only."""
     syllable = re.sub(r"[0-9]", "", jyutping.lower())
     if v2:
         # Jyutping writes /jy/ as "jyu" (雨 jyu5, 月 jyut6): one glide, not "yyu".
@@ -121,6 +201,7 @@ def jyutping_to_label(jyutping: str, v2: bool = False) -> str:
 
 
 def cantonese_readings(text: str, v2: bool = False) -> list[str]:
+    """One Jyutping label per character of ``text`` (ToJyutping); all '' when readings and characters do not line up."""
     try:
         import ToJyutping
     except ImportError as error:  # pragma: no cover
@@ -136,8 +217,20 @@ def cantonese_readings(text: str, v2: bool = False) -> list[str]:
 
 # Syllables where pythainlp's rule engine leaves a Thai mark behind, or reads a frequent
 # function word wrongly.
-_THAI_EXCEPTIONS = {"ก็": "ko", "เพราะ": "phro", "เอ๊ะ": "e", "อ": "o", "เหน็บ": "nep", "เถอะ": "tho",
-                    "นะ": "na", "ล่ะ": "la", "เนอะ": "noe", "เอะ": "e", "ค่ะ": "kha", "คะ": "kha"}
+_THAI_EXCEPTIONS = {
+    "ก็": "ko",
+    "เพราะ": "phro",
+    "เอ๊ะ": "e",
+    "อ": "o",
+    "เหน็บ": "nep",
+    "เถอะ": "tho",
+    "นะ": "na",
+    "ล่ะ": "la",
+    "เนอะ": "noe",
+    "เอะ": "e",
+    "ค่ะ": "kha",
+    "คะ": "kha",
+}
 _THAI_LETTER = re.compile(r"[฀-๿]")
 
 
@@ -145,6 +238,7 @@ def _thai_syllable_label(syllable: str, uroman) -> str:
     if syllable in _THAI_EXCEPTIONS:
         return _THAI_EXCEPTIONS[syllable]
     from pythainlp.transliterate import romanize
+
     label = romanize(syllable, engine="royin").lower()
     if label and not _LETTERS.search(label):
         return label
@@ -215,7 +309,7 @@ def _arabic_skeleton_vowels(label: str) -> str:
     position = 0
     while position < len(label):
         if label.startswith(_ARABIC_DIGRAPHS, position):
-            tokens.append(label[position:position + 2])
+            tokens.append(label[position : position + 2])
             position += 2
         else:
             tokens.append(label[position])
@@ -239,19 +333,41 @@ def _arabic_skeleton_vowels(label: str) -> str:
 
 # uroman language codes per Unicode script (first word of the character name).
 UROMAN_SCRIPTS = {
-    "CYRILLIC": "rus", "GREEK": "ell", "HEBREW": "heb", "ARMENIAN": "hye", "GEORGIAN": "kat",
-    "BENGALI": "ben", "GUJARATI": "guj", "KANNADA": "kan", "MALAYALAM": "mal", "TAMIL": "tam",
-    "TELUGU": "tel", "SINHALA": "sin", "KHMER": "khm", "LAO": "lao", "MYANMAR": "mya",
-    "ETHIOPIC": "amh", "TIBETAN": "bod", "ORIYA": "ori", "MONGOLIAN": "mon", "THAANA": "div",
-    "SYRIAC": "syr", "TIFINAGH": "ber", "CHEROKEE": "chr", "CANADIAN": "cr",
+    "CYRILLIC": "rus",
+    "GREEK": "ell",
+    "HEBREW": "heb",
+    "ARMENIAN": "hye",
+    "GEORGIAN": "kat",
+    "BENGALI": "ben",
+    "GUJARATI": "guj",
+    "KANNADA": "kan",
+    "MALAYALAM": "mal",
+    "TAMIL": "tam",
+    "TELUGU": "tel",
+    "SINHALA": "sin",
+    "KHMER": "khm",
+    "LAO": "lao",
+    "MYANMAR": "mya",
+    "ETHIOPIC": "amh",
+    "TIBETAN": "bod",
+    "ORIYA": "ori",
+    "MONGOLIAN": "mon",
+    "THAANA": "div",
+    "SYRIAC": "syr",
+    "TIFINAGH": "ber",
+    "CHEROKEE": "chr",
+    "CANADIAN": "cr",
 }
 
 
 def script_name(char: str) -> str:
+    """Unicode script of ``char``: the first word of its character name ('' when unnamed)."""
     return unicodedata.name(char, "").split(" ", 1)[0]
 
 
 def uroman_label(text: str, uroman, lcode: str | None = None) -> str:
+    """uroman romanization of ``text`` (language rules ``lcode`` if given), lower-cased, without hyphens, spaces or
+    '."""
     label = uroman.romanize_string(text, lcode=lcode) if lcode else uroman.romanize_string(text)
     return label.lower().replace("-", "").replace(" ", "").replace("'", "")
 
@@ -287,7 +403,11 @@ def latin_v2_source(text: str, lcode: str | None) -> str:
         source = source.replace("ğ", "").replace("Ğ", "")
     if _HORN in unicodedata.normalize("NFD", source):
         decomposed = unicodedata.normalize("NFD", source)
-        decomposed = (decomposed.replace("u" + _HORN, "uw").replace("U" + _HORN, "Uw")
-                      .replace("o" + _HORN, "ow").replace("O" + _HORN, "Ow"))
+        decomposed = (
+            decomposed.replace("u" + _HORN, "uw")
+            .replace("U" + _HORN, "Uw")
+            .replace("o" + _HORN, "ow")
+            .replace("O" + _HORN, "Ow")
+        )
         source = unicodedata.normalize("NFC", decomposed)
     return source

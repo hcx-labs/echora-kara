@@ -1,3 +1,11 @@
+"""CTC forced aligners and the full-song alignment entry point.
+
+``Wav2Vec2ForcedAligner`` runs a fine-tuned wav2vec2 / w2v-BERT CTC checkpoint (optionally MuQ-fused, with edge,
+background, VAD/F0 and text-aligner heads) over 45 s chunks and stitches one log-probability lattice per song;
+``align_audio_with_timeline`` decodes that lattice into per-token start/end times for the lyric lines.
+``TorchAudioForcedAligner`` is the stock torchaudio MMS_FA baseline.
+"""
+
 import logging
 import os
 from abc import ABC, abstractmethod
@@ -34,7 +42,8 @@ from echora_kara.engine.ctc_segmentation import (
     stitched_frame_times,
     token_minimum_frames,
     vocal_activity,
-    with_vocal_activity)
+    with_vocal_activity,
+)
 
 # Auxiliary heads shipped next to a w2v-BERT checkpoint (as in mrfakename/w2v-bert-2.0-music-lyrics-ctc):
 # ``vad`` is one vocal-activity logit per frame,
@@ -51,11 +60,15 @@ _MMS_ALIGNER_CACHE: "TorchAudioForcedAligner | None" = None
 
 
 class ForcedAligner(ABC):
+    """Interface shared by the CTC aligners: tokenize lyric text, then align token ids against a waveform."""
+
     @abstractmethod
     def tokenize(
         self,
         batch: list[str],
-    ) -> list[list[int]]: ...
+    ) -> list[list[int]]:
+        """Token ids for each string in ``batch``, without special tokens."""
+        ...
 
     @abstractmethod
     def align(
@@ -63,7 +76,10 @@ class ForcedAligner(ABC):
         tokens: list[list[int]],
         waveform: torch.Tensor,
         sample_rate: int,
-    ) -> tuple[torch.Tensor, list[list[TokenSpan]], int]: ...
+    ) -> tuple[torch.Tensor, list[list[TokenSpan]], int]:
+        """Emission [1, frames, vocab], one list of ``TokenSpan`` (frame indices) per token sequence, and the model
+        sample rate in Hz."""
+        ...
 
 
 class TorchAudioForcedAligner(ForcedAligner):
@@ -82,9 +98,12 @@ class TorchAudioForcedAligner(ForcedAligner):
         self.aligner = self.bundle.get_aligner()
 
     def tokenize(self, batch: list[str]):
+        """Token ids from the MMS_FA tokenizer for each string in ``batch``."""
         return cast(list[list[int]], self.tokenizer(batch))
 
     def align(self, tokens: list[list[int]], waveform: torch.Tensor, sample_rate: int):
+        """Run MMS_FA on the mono-downmixed, resampled waveform and align ``tokens`` in one pass; see
+        ``ForcedAligner.align`` for the return value."""
         logger.info(f"TorchAudioForcedAligner: running MMS_FA on {self.device}")
         waveform = resample(waveform, sample_rate, int(self.bundle.sample_rate))
         waveform = waveform.mean(0, keepdim=True)
@@ -95,9 +114,7 @@ class TorchAudioForcedAligner(ForcedAligner):
         return emission, token_spans, int(self.bundle.sample_rate)
 
 
-def _inference_chunk_starts(
-    total_samples: int, chunk_samples: int, overlap_samples: int
-) -> list[int]:
+def _inference_chunk_starts(total_samples: int, chunk_samples: int, overlap_samples: int) -> list[int]:
     step_samples = chunk_samples - overlap_samples
     return [
         start
@@ -168,28 +185,20 @@ class Wav2Vec2ForcedAligner(ForcedAligner):
             if fusion not in FUSION_MODES:
                 raise ValueError(f"fusion must be one of {FUSION_MODES}")
             if fusion == "off":
-                raise RuntimeError(
-                    f"{model} is a MuQ fusion checkpoint; set fusion='on' (or 'gate0') to load it"
-                )
-            self.fusion_adapter = load_fusion_adapter(
-                model, dict(fusion_record), self.model.lm_head.in_features
-            ).to(self.device)
+                raise RuntimeError(f"{model} is a MuQ fusion checkpoint; set fusion='on' (or 'gate0') to load it")
+            self.fusion_adapter = load_fusion_adapter(model, dict(fusion_record), self.model.lm_head.in_features).to(
+                self.device
+            )
             self._fusion_layer = int(fusion_record["layer"])
             if fusion == "gate0":
                 self.fusion_adapter.force_zero = True
             else:
-                self.fusion_branch = MuQBranch(
-                    fusion_model or fusion_record["model"], device=self.device
-                )
+                self.fusion_branch = MuQBranch(fusion_model or fusion_record["model"], device=self.device)
                 # A checkpoint trained with --fusion-lora-rank carries LoRA adapters for MuQ.
                 if fusion_record.get("lora"):
-                    load_fusion_lora(model, dict(fusion_record["lora"])).to(self.device).attach(
-                        self.fusion_branch
-                    )
+                    load_fusion_lora(model, dict(fusion_record["lora"])).to(self.device).attach(self.fusion_branch)
         # Vocal-activity and F0 heads (inference features; ``vocal_activity_source="vad"``).
-        self.aux_heads: torch.nn.ModuleDict | None = _load_aux_heads(
-            model, self.model.lm_head.in_features
-        )
+        self.aux_heads: torch.nn.ModuleDict | None = _load_aux_heads(model, self.model.lm_head.in_features)
         if self.aux_heads is not None:
             self.aux_heads.to(self.device)
         self.last_edge_logits: torch.Tensor | None = None
@@ -207,9 +216,7 @@ class Wav2Vec2ForcedAligner(ForcedAligner):
         keeps ``vocal_activity_weight`` on the same footing for both sources. ``scaled=False``
         returns the raw sigmoid."""
         if self.last_vad_logits is None:
-            raise RuntimeError(
-                "vocal_activity_source='vad' needs a checkpoint with aux_heads.safetensors"
-            )
+            raise RuntimeError("vocal_activity_source='vad' needs a checkpoint with aux_heads.safetensors")
         probability = torch.sigmoid(self.last_vad_logits.float())
         if not scaled:
             return probability
@@ -224,9 +231,11 @@ class Wav2Vec2ForcedAligner(ForcedAligner):
 
     @property
     def tokenizer(self) -> Wav2Vec2CTCTokenizer:
+        """The checkpoint's CTC tokenizer (from its processor)."""
         return self.processor.tokenizer  # pyright: ignore[reportAttributeAccessIssue]
 
     def tokenize(self, batch: list[str]):
+        """Token ids for each string in ``batch`` from the checkpoint vocabulary, without special tokens."""
         return [self.tokenizer.encode(e, add_special_tokens=False) for e in batch]
 
     def infer(self, waveform: torch.Tensor, sample_rate: int) -> tuple[torch.Tensor, int, float]:
@@ -277,11 +286,7 @@ class Wav2Vec2ForcedAligner(ForcedAligner):
                 )
                 # w2v-BERT: fbank pairs are padded to a multiple of two; the attention mask
                 # marks the valid model frames and the last one may be padding.
-                valid = (
-                    int(inputs["attention_mask"].sum())
-                    if self.backbone == "wav2vec2-bert"
-                    else None
-                )
+                valid = int(inputs["attention_mask"].sum()) if self.backbone == "wav2vec2-bert" else None
                 with torch.inference_mode():
                     outputs = self.model(**inputs.to(self.device))
                     local = torch.nn.functional.log_softmax(outputs.logits[0], dim=-1).cpu()
@@ -314,9 +319,7 @@ class Wav2Vec2ForcedAligner(ForcedAligner):
                 # no frame is decoded twice and edge-context damage is minimized.
                 overlap_frames = round(local.shape[0] * overlap_samples / max(1, chunk.numel()))
                 trim_left = overlap_frames // 2 if chunk_index else 0
-                trim_right = (
-                    overlap_frames - overlap_frames // 2 if chunk_index + 1 < len(starts) else 0
-                )
+                trim_right = overlap_frames - overlap_frames // 2 if chunk_index + 1 < len(starts) else 0
                 stop = local.shape[0] - trim_right if trim_right else None
                 emissions.append(local[trim_left:stop])
                 if edge_local is not None:
@@ -341,7 +344,9 @@ class Wav2Vec2ForcedAligner(ForcedAligner):
         self.last_f0_logits = torch.cat(f0_parts) if f0_parts else None
         # The true receptive-field-centre time of every stitched frame (opt-in clock).
         self.last_frame_times = stitched_frame_times(
-            waveform.numel(), sample_rate=target_sample_rate, backbone=self.backbone,
+            waveform.numel(),
+            sample_rate=target_sample_rate,
+            backbone=self.backbone,
             overlap_seconds=overlap_seconds,
         )
         if self.last_frame_times.shape[0] != emission.shape[0]:
@@ -386,8 +391,16 @@ class Wav2Vec2ForcedAligner(ForcedAligner):
                 h = hidden[piece].to(self.device)[None]
                 letters = emission[piece].to(self.device, torch.float32)[None]
                 padding = torch.zeros(h.shape[:2], dtype=torch.bool, device=self.device)
-                out = head.forward_parts(h, padding, text["letters"], text["voice"], text["text_padding"], letters,
-                                         text["line"], text["position"])[0]
+                out = head.forward_parts(
+                    h,
+                    padding,
+                    text["letters"],
+                    text["voice"],
+                    text["text_padding"],
+                    letters,
+                    text["line"],
+                    text["position"],
+                )[0]
                 if "token" in out:
                     share = out["token"][0][:, lead_columns]
                 else:  # an unfactorized head: its lead columns renormalised without "none"
@@ -422,6 +435,8 @@ class Wav2Vec2ForcedAligner(ForcedAligner):
         return hidden if term is None else hidden + term.to(hidden.dtype)
 
     def align(self, tokens: list[list[int]], waveform: torch.Tensor, sample_rate: int):
+        """Plain CTC Viterbi of ``tokens`` over the stitched lattice from ``infer`` (which also refreshes the
+        ``last_*`` head outputs); returns emission [1, frames, vocab], spans per sequence and the model sample rate."""
         emission, sample_rate, _ = self.infer(waveform, sample_rate)
         token_spans = _align_token_spans(emission, tokens, blank=self.blank)
         return emission.unsqueeze(0), token_spans, sample_rate
@@ -483,7 +498,11 @@ def _load_text_aligner(model_dir: str, record: dict):
 
     head = TextAligner(TextAlignerConfig(**record))
     with safe_open(os.path.join(model_dir, "model.safetensors"), framework="pt", device="cpu") as handle:
-        state = {k.removeprefix("text_aligner."): handle.get_tensor(k) for k in handle.keys() if k.startswith("text_aligner.")}
+        state = {
+            k.removeprefix("text_aligner."): handle.get_tensor(k)
+            for k in handle.keys()
+            if k.startswith("text_aligner.")
+        }
     head.load_state_dict(state)
     return head.eval()
 
@@ -512,12 +531,8 @@ def _load_edge_head(model_dir: str, in_features: int, prefix: str = "edge_head",
     return head.eval()
 
 
-def _align_token_spans(
-    emission: torch.Tensor, tokens: list[list[int]], *, blank: int
-) -> list[list[TokenSpan]]:
-    aligned_tokens, scores = aligner._align_emission_and_tokens(
-        emission, _flatten_token_sequences(tokens), blank=blank
-    )
+def _align_token_spans(emission: torch.Tensor, tokens: list[list[int]], *, blank: int) -> list[list[TokenSpan]]:
+    aligned_tokens, scores = aligner._align_emission_and_tokens(emission, _flatten_token_sequences(tokens), blank=blank)
     spans = merge_tokens(aligned_tokens, scores, blank=blank)
     return _unflatten_token_spans(spans, [len(seq) for seq in tokens])
 
@@ -526,13 +541,9 @@ def _flatten_token_sequences(tokens: list[list[int]]) -> list[int]:
     return [token for seq in tokens for token in seq]
 
 
-def _unflatten_token_spans(
-    spans: list[TokenSpan], token_lengths: list[int]
-) -> list[list[TokenSpan]]:
+def _unflatten_token_spans(spans: list[TokenSpan], token_lengths: list[int]) -> list[list[TokenSpan]]:
     if len(spans) != sum(token_lengths):
-        raise RuntimeError(
-            "Forced alignment returned a different number of token spans than tokens."
-        )
+        raise RuntimeError("Forced alignment returned a different number of token spans than tokens.")
     offset = 0
     grouped_spans: list[list[TokenSpan]] = []
     for length in token_lengths:
@@ -587,10 +598,7 @@ def _assign_ctc_blank_holds(
     ):
         raise ValueError("blank hold duration must be finite and nonnegative")
     max_frames = int(max_extension_seconds / frame_duration)
-    result = [
-        [TokenSpan(span.token, span.start, span.end, span.score) for span in group]
-        for group in groups
-    ]
+    result = [[TokenSpan(span.token, span.start, span.end, span.score) for span in group] for group in groups]
     if not line_ranges:
         return result
     line_ends = {end - 1 for _, end in line_ranges if end > 0}
@@ -607,9 +615,7 @@ def _assign_ctc_blank_holds(
             continue
         # Blanks may also be silence; cap this display heuristic.
         last = current[-1]
-        current[-1] = TokenSpan(
-            last.token, last.start, min(next_start, last.end + max_frames), last.score
-        )
+        current[-1] = TokenSpan(last.token, last.start, min(next_start, last.end + max_frames), last.score)
     return result
 
 
@@ -644,16 +650,22 @@ def _display_span_results(
         fraction = fractions[index] if fractions is not None else 0.0
         item = _span_result(token, held, frame_duration, shift, frame_times, fraction)
         acoustic = _span_result(token, raw, frame_duration, shift, frame_times, fraction)
-        item.update(
-            acoustic_start=acoustic["original_start"], acoustic_end=acoustic["original_end"]
-        )
+        item.update(acoustic_start=acoustic["original_start"], acoustic_end=acoustic["original_end"])
         results.append(item)
     return results
 
 
 def _decode_background_blocks(
-    plan, all_encoded, lead_spans, lead_ranges, aligner_model, frame_shift, min_letter_ms,
-    min_token_ms, blank_free_tokens, margin_seconds=1.0,
+    plan,
+    all_encoded,
+    lead_spans,
+    lead_ranges,
+    aligner_model,
+    frame_shift,
+    min_letter_ms,
+    min_token_ms,
+    blank_free_tokens,
+    margin_seconds=1.0,
 ):
     """Decode each block of consecutive background lines on the background head.
 
@@ -669,9 +681,7 @@ def _decode_background_blocks(
     vowels = {vocabulary[letter] for letter in "aeiouy" if letter in vocabulary}
     letter_cap = max(1, round(min_letter_ms / 1000 / frame_shift)) if min_letter_ms > 0 else 1
     token_cap = round(min_token_ms / 1000 / frame_shift) if min_token_ms > 0 else 0
-    lead_line_frames = [
-        (lead_spans[start][0].start, lead_spans[end - 1][-1].end) for start, end in lead_ranges
-    ]
+    lead_line_frames = [(lead_spans[start][0].start, lead_spans[end - 1][-1].end) for start, end in lead_ranges]
     blocks, lead_seen = [], 0
     for line_index, flag, tokens in plan:
         if not flag:
@@ -694,13 +704,18 @@ def _decode_background_blocks(
         window = background[start:stop].to(torch.float32)
         try:
             spans = align_with_minimum_durations(
-                window, groups, blank=aligner_model.blank,
+                window,
+                groups,
+                blank=aligner_model.blank,
                 minimum_frames=token_minimum_frames(groups, letter_cap, token_cap, vowels),
                 blank_free_tokens=blank_free_tokens,
             )
         except RuntimeError:
             spans = align_with_minimum_durations(
-                window, groups, blank=aligner_model.blank, minimum_frames=[1] * sum(map(len, groups)),
+                window,
+                groups,
+                blank=aligner_model.blank,
+                minimum_frames=[1] * sum(map(len, groups)),
                 blank_free_tokens=blank_free_tokens,
             )
         block["spans"] = [[TokenSpan(s.token, s.start + start, s.end + start, s.score) for s in g] for g in spans]
@@ -709,7 +724,13 @@ def _decode_background_blocks(
 
 
 def _merge_background_results(
-    lead_results, blocks, all_tokens, frame_shift, speed, timing_offset_ms, frame_times,
+    lead_results,
+    blocks,
+    all_tokens,
+    frame_shift,
+    speed,
+    timing_offset_ms,
+    frame_times,
     onset_offsets_ms,
 ):
     """Display results of the background blocks, merged into the lead's in input token order."""
@@ -722,11 +743,18 @@ def _merge_background_results(
         tokens = [all_tokens[i] for i in block["tokens"]]
         token_offsets = (
             [float(onset_offsets_ms.get(onset_class(token), 0.0)) / 1000.0 for token in tokens]
-            if onset_offsets_ms else None
+            if onset_offsets_ms
+            else None
         )
         results = _display_span_results(
-            tokens, block["spans"], ranges, frame_shift * speed, timing_offset_ms / 1000.0,
-            frame_times, None, token_offsets,
+            tokens,
+            block["spans"],
+            ranges,
+            frame_shift * speed,
+            timing_offset_ms / 1000.0,
+            frame_times,
+            None,
+            token_offsets,
         )
         for index, result in zip(block["tokens"], results):
             result["voice"] = "background"
@@ -744,9 +772,7 @@ def _wav2vec_aligner(
     key = (model, bool(use_gpu), fusion, fusion_model)
     cached = _WAV2VEC_ALIGNER_CACHE.get(key)
     if cached is None:
-        cached = Wav2Vec2ForcedAligner(
-            model, use_gpu=use_gpu, fusion=fusion, fusion_model=fusion_model
-        )
+        cached = Wav2Vec2ForcedAligner(model, use_gpu=use_gpu, fusion=fusion, fusion_model=fusion_model)
         _WAV2VEC_ALIGNER_CACHE[key] = cached
     return cached
 
@@ -868,16 +894,13 @@ def align_audio_with_timeline(
 
                 values = torch.from_numpy(np.load(vocal_activity_file).astype("float32"))
                 activity = torch.nn.functional.interpolate(
-                    values[None, None], size=emission.shape[0], mode="linear", align_corners=False)[0, 0]
+                    values[None, None], size=emission.shape[0], mode="linear", align_corners=False
+                )[0, 0]
                 low, high = torch.quantile(activity, 0.1), torch.quantile(activity, 0.9)
                 activity = ((activity - low) / (high - low).clamp_min(1e-6)).clamp(0, 1)
             else:
-                activity = vocal_activity(
-                    resample(waveform, sample_rate, 16000).mean(0), emission.shape[0]
-                )
-            emission = with_vocal_activity(
-                emission, activity, aligner_model.blank, vocal_activity_weight
-            )
+                activity = vocal_activity(resample(waveform, sample_rate, 16000).mean(0), emission.shape[0])
+            emission = with_vocal_activity(emission, activity, aligner_model.blank, vocal_activity_weight)
         duration_floor = None
         gap_cost = float(os.environ.get("ECHORA_KARA_IN_LINE_GAP_COST", "0"))
         has_floors = min_letter_ms > 0 or min_token_ms > 0
@@ -889,7 +912,9 @@ def align_audio_with_timeline(
             token_cap = round(min_token_ms / 1000 / frame_shift)
             if has_floors and duration_pace_ratio > 0:
                 initial_spans = align_with_minimum_durations(
-                    emission, encoded, blank=aligner_model.blank,
+                    emission,
+                    encoded,
+                    blank=aligner_model.blank,
                     minimum_frames=[1 for group in encoded for _ in group],
                     blank_free_tokens=blank_free_tokens,
                 )
@@ -916,8 +941,12 @@ def align_audio_with_timeline(
                 letter_of = [letter for group in encoded for letter in group]
                 owner = [k for k, group in enumerate(encoded) for _ in group]
                 decode_emission = torch.cat(
-                    (emission[:, letter_of] + text_bonus * text_share[:, owner].to(emission),
-                     emission[:, aligner_model.blank : aligner_model.blank + 1]), 1)
+                    (
+                        emission[:, letter_of] + text_bonus * text_share[:, owner].to(emission),
+                        emission[:, aligner_model.blank : aligner_model.blank + 1],
+                    ),
+                    1,
+                )
                 decode_groups, cursor = [], 0
                 for group in encoded:
                     decode_groups.append(list(range(cursor, cursor + len(group))))
@@ -934,26 +963,38 @@ def align_audio_with_timeline(
             )
             try:
                 initial_spans = align_with_minimum_durations(
-                    decode_emission, decode_groups, minimum_frames=minimums, **decode_options)
+                    decode_emission, decode_groups, minimum_frames=minimums, **decode_options
+                )
             except RuntimeError:
                 if not has_floors:
                     raise
                 initial_spans = align_with_minimum_durations(
-                    decode_emission, decode_groups,
-                    minimum_frames=[1 for group in encoded for _ in group], **decode_options)
+                    decode_emission,
+                    decode_groups,
+                    minimum_frames=[1 for group in encoded for _ in group],
+                    **decode_options,
+                )
                 duration_floor = "too_dense_one_frame_fallback"
             if letter_of is not None:
-                initial_spans = [[TokenSpan(letter_of[s.token], s.start, s.end, s.score) for s in group]
-                                 for group in initial_spans]
-            duration_floor = duration_floor or ({
-                "letter_ms": min_letter_ms,
-                "token_ms": min_token_ms,
-                "pace_ratio": duration_pace_ratio,
-            } if has_floors else None)
+                initial_spans = [
+                    [TokenSpan(letter_of[s.token], s.start, s.end, s.score) for s in group] for group in initial_spans
+                ]
+            duration_floor = duration_floor or (
+                {
+                    "letter_ms": min_letter_ms,
+                    "token_ms": min_token_ms,
+                    "pace_ratio": duration_pace_ratio,
+                }
+                if has_floors
+                else None
+            )
         else:
             initial_spans = align_with_source_priors(
-                emission, encoded, blank=aligner_model.blank,
-                frame_shift_seconds=frame_shift, source_priors=[],
+                emission,
+                encoded,
+                blank=aligner_model.blank,
+                frame_shift_seconds=frame_shift,
+                source_priors=[],
             )
         if len(initial_spans) != len(acoustic_tokens):
             raise RuntimeError("global CTC alignment returned the wrong token count")
@@ -993,8 +1034,15 @@ def align_audio_with_timeline(
         # their frames free to be silence for the lead (the main head hears echoes too, so
         # the lead would otherwise hold its last word through them).
         background_blocks = _decode_background_blocks(
-            background_plan, all_encoded, initial_spans, line_acoustic_ranges, aligner_model,
-            frame_shift, min_letter_ms, min_token_ms, blank_free_tokens,
+            background_plan,
+            all_encoded,
+            initial_spans,
+            line_acoustic_ranges,
+            aligner_model,
+            frame_shift,
+            min_letter_ms,
+            min_token_ms,
+            blank_free_tokens,
         )
         explained = raw_emission.clone()
         for block in background_blocks:
@@ -1012,17 +1060,15 @@ def align_audio_with_timeline(
         fractions = refine_group_starts(scoring_emission, initial_spans, blank=aligner_model.blank)
     token_offsets = None
     if onset_offsets_ms:
-        token_offsets = [
-            float(onset_offsets_ms.get(onset_class(token), 0.0)) / 1000.0
-            for token in acoustic_tokens
-        ]
+        token_offsets = [float(onset_offsets_ms.get(onset_class(token), 0.0)) / 1000.0 for token in acoustic_tokens]
     diagnostics = {
         "source_timeline": "ignored",
         "minimum_duration": duration_floor,
         "in_line_gap_cost": float(os.environ.get("ECHORA_KARA_IN_LINE_GAP_COST", "0")),
         "text_bonus_requested": text_bonus,
-        "text_bonus_status": ("applied" if text_share is not None else
-                              "unavailable_no_text_head" if text_bonus > 0 else "disabled"),
+        "text_bonus_status": (
+            "applied" if text_share is not None else "unavailable_no_text_head" if text_bonus > 0 else "disabled"
+        ),
         "timing_offset_ms": timing_offset_ms,
         "vocal_activity_weight": vocal_activity_weight,
         "ctc_blank_hold_assignment": "bounded_display_extension_not_silence_aware",
@@ -1040,9 +1086,7 @@ def align_audio_with_timeline(
             edge_weight=edge_weight,
         )
     if vocal_activity_source != "energy" or aligner_model.backbone != "wav2vec2":
-        diagnostics.update(
-            vocal_activity_source=vocal_activity_source, backbone=aligner_model.backbone
-        )
+        diagnostics.update(vocal_activity_source=vocal_activity_source, backbone=aligner_model.backbone)
     # Frame k is reported at k * shift. Measured against reference word starts, those times
     # run early (frame centres, plus CTC firing ahead of the sung onset): calibrated offset.
     results = _display_span_results(
@@ -1057,8 +1101,14 @@ def align_audio_with_timeline(
     )
     if background_plan is not None:
         results = _merge_background_results(
-            results, background_blocks, all_tokens, frame_shift, speed, timing_offset_ms,
-            frame_times, onset_offsets_ms,
+            results,
+            background_blocks,
+            all_tokens,
+            frame_shift,
+            speed,
+            timing_offset_ms,
+            frame_times,
+            onset_offsets_ms,
         )
         diagnostics["background_decoding"] = {
             "head": "background_head",

@@ -1,4 +1,5 @@
 """Weak timed-character labels on the MMS convolution frame-center clock."""
+
 import math
 
 PAD_TOKEN_ID = 29
@@ -9,9 +10,13 @@ FRAME_STRIDE_SECONDS = 320 / 16000
 FRAME_OFFSET_SECONDS = 199.5 / 16000
 
 
-def frame_labels(alignment_tokens: list[dict], audio_duration_seconds: float,
-                 output_frames: int, frame_stride_seconds: float = FRAME_STRIDE_SECONDS,
-                 frame_offset_seconds: float = FRAME_OFFSET_SECONDS) -> list[int]:
+def frame_labels(
+    alignment_tokens: list[dict],
+    audio_duration_seconds: float,
+    output_frames: int,
+    frame_stride_seconds: float = FRAME_STRIDE_SECONDS,
+    frame_offset_seconds: float = FRAME_OFFSET_SECONDS,
+) -> list[int]:
     """Assign each output frame using its receptive-field center in audio.
 
     Token character boundaries remain weak proportional estimates inside the
@@ -51,16 +56,23 @@ def frame_labels(alignment_tokens: list[dict], audio_duration_seconds: float,
     return labels
 
 
-def frame_index(seconds: float, frame_stride_seconds: float = FRAME_STRIDE_SECONDS,
-                frame_offset_seconds: float = FRAME_OFFSET_SECONDS) -> int:
+def frame_index(
+    seconds: float,
+    frame_stride_seconds: float = FRAME_STRIDE_SECONDS,
+    frame_offset_seconds: float = FRAME_OFFSET_SECONDS,
+) -> int:
     """First frame whose receptive-field center is at or after ``seconds``."""
     return math.ceil((seconds - frame_offset_seconds) / frame_stride_seconds - 1e-9)
 
 
-def ctc_regions(alignment_tokens: list[dict], labels: list[int], audio_duration_seconds: float,
-                frame_stride_seconds: float = FRAME_STRIDE_SECONDS,
-                frame_offset_seconds: float = FRAME_OFFSET_SECONDS,
-                repeat_blanks: bool = True) -> list[tuple[int, int, list[int]]]:
+def ctc_regions(
+    alignment_tokens: list[dict],
+    labels: list[int],
+    audio_duration_seconds: float,
+    frame_stride_seconds: float = FRAME_STRIDE_SECONDS,
+    frame_offset_seconds: float = FRAME_OFFSET_SECONDS,
+    repeat_blanks: bool = True,
+) -> list[tuple[int, int, list[int]]]:
     """Whole source fragments whose letters the region loss may place freely.
 
     Each region is one timed source fragment, not one 6-letter chunk: chunk
@@ -87,8 +99,9 @@ def ctc_regions(alignment_tokens: list[dict], labels: list[int], audio_duration_
     return regions
 
 
-def tolerant_frame_targets(labels: list[int], regions: list[tuple[int, int, list[int]]],
-                           tolerance_frames: int) -> list[int]:
+def tolerant_frame_targets(
+    labels: list[int], regions: list[tuple[int, int, list[int]]], tolerance_frames: int
+) -> list[int]:
     """Frame-loss targets once CTC owns its regions.
 
     Region frames leave the frame loss. Blank frames within ``tolerance_frames``
@@ -105,9 +118,13 @@ def tolerant_frame_targets(labels: list[int], regions: list[tuple[int, int, list
     return targets
 
 
-def ignore_unregioned(alignment_tokens: list[dict], labels: list[int], regions: list[tuple[int, int, list[int]]],
-                      frame_stride_seconds: float = FRAME_STRIDE_SECONDS,
-                      frame_offset_seconds: float = FRAME_OFFSET_SECONDS) -> list[int]:
+def ignore_unregioned(
+    alignment_tokens: list[dict],
+    labels: list[int],
+    regions: list[tuple[int, int, list[int]]],
+    frame_stride_seconds: float = FRAME_STRIDE_SECONDS,
+    frame_offset_seconds: float = FRAME_OFFSET_SECONDS,
+) -> list[int]:
     """``--region-fallback ignore``: frames of a measured fragment that got no region (cut by the
     window, overlapped by a mask or another fragment, or too short for its letters) become ignore
     instead of the proportional per-letter guess (in a typical manifest ~1.7 % of fragments are

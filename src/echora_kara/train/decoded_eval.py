@@ -9,6 +9,7 @@ clock against the reference starts give eval_decoded_{median_ms, mean_ms, over50
 eval_decoded_bonus_*), the numbers the held-out bench reports. The background head gets a threshold-free
 average precision (1 - P(blank) per frame against the reference background-token frames): eval_background_ap.
 """
+
 from __future__ import annotations
 
 import json
@@ -26,7 +27,8 @@ from echora_kara.engine.ctc_segmentation import (
     paced_minimum_frames,
     stitched_frame_times,
     vocal_activity,
-    with_vocal_activity)
+    with_vocal_activity,
+)
 from echora_kara.model import text_aligner as ta
 
 BLANK = proto.BLANK
@@ -34,8 +36,12 @@ BLANK = proto.BLANK
 
 def _summary(errors_ms: np.ndarray, prefix: str) -> dict:
     absolute = np.abs(errors_ms)
-    return {f"{prefix}median_ms": float(np.median(absolute)), f"{prefix}mean_ms": float(absolute.mean()),
-            f"{prefix}over500": int((absolute > 500).sum()), f"{prefix}f1_50": float((absolute <= 50).mean())}
+    return {
+        f"{prefix}median_ms": float(np.median(absolute)),
+        f"{prefix}mean_ms": float(absolute.mean()),
+        f"{prefix}over500": int((absolute > 500).sum()),
+        f"{prefix}f1_50": float((absolute <= 50).mean()),
+    }
 
 
 def _average_precision(scores: np.ndarray, truth: np.ndarray) -> float:
@@ -48,8 +54,22 @@ def _average_precision(scores: np.ndarray, truth: np.ndarray) -> float:
 
 
 class DecodedEval:
-    def __init__(self, root: Path, manifest: Path, ids_file: Path, songs: int, song_text: dict | None,
-                 bonus: float = 0.1, gap_cost: float = 0.2):
+    """Whole-song decoded-timing evaluation over the first ``songs`` validation ids listed in ``ids_file``.
+
+    Decoded audio is cached in memory across evaluations. ``bonus`` is the text-head beta and ``gap_cost`` the
+    decoder's in-line gap cost.
+    """
+
+    def __init__(
+        self,
+        root: Path,
+        manifest: Path,
+        ids_file: Path,
+        songs: int,
+        song_text: dict | None,
+        bonus: float = 0.1,
+        gap_cost: float = 0.2,
+    ):
         wanted = [line.strip() for line in open(ids_file) if line.strip() and not line.startswith("#")]
         rows = {}
         with open(manifest) as source:
@@ -71,20 +91,27 @@ class DecodedEval:
         if head is not None and self.song_text is not None and song["id"] in self.song_text:
             record = self.song_text[song["id"]]
             n = len(record["voice"])
-            text = {"letters": torch.from_numpy(record["letters"].astype(np.int64))[None].to(device),
-                    "voice": torch.from_numpy(record["voice"].astype(np.int64))[None].to(device),
-                    "line": torch.from_numpy(record["line"].astype(np.int64))[None].to(device),
-                    "position": torch.from_numpy(record["position"].astype(np.int64))[None].to(device),
-                    "text_padding": torch.zeros((1, n), dtype=torch.bool, device=device)}
+            text = {
+                "letters": torch.from_numpy(record["letters"].astype(np.int64))[None].to(device),
+                "voice": torch.from_numpy(record["voice"].astype(np.int64))[None].to(device),
+                "line": torch.from_numpy(record["line"].astype(np.int64))[None].to(device),
+                "position": torch.from_numpy(record["position"].astype(np.int64))[None].to(device),
+                "text_padding": torch.zeros((1, n), dtype=torch.bool, device=device),
+            }
         letters, tokens, backing = [], [], []
         for index, start in enumerate(starts):
-            piece = audio[start:start + chunk]
+            piece = audio[start : start + chunk]
             captured = {}
             hook = model.lm_head.register_forward_hook(lambda _m, inputs, _o: captured.__setitem__("hidden", inputs[0]))
             try:
-                extra = ({"fusion_input_values": torch.from_numpy(piece)[None].to(device),
-                          "fusion_lengths": torch.tensor([len(piece)], device=device)}
-                         if getattr(model, "fusion", None) is not None else {})
+                extra = (
+                    {
+                        "fusion_input_values": torch.from_numpy(piece)[None].to(device),
+                        "fusion_lengths": torch.tensor([len(piece)], device=device),
+                    }
+                    if getattr(model, "fusion", None) is not None
+                    else {}
+                )
                 normalised = (piece - piece.mean()) / (piece.std() + 1e-7)
                 out = model(input_values=torch.from_numpy(normalised)[None].to(device), **extra)
             finally:
@@ -94,8 +121,16 @@ class DecodedEval:
             if text is not None:
                 hidden = captured["hidden"].float()
                 padding = torch.zeros(hidden.shape[:2], dtype=torch.bool, device=device)
-                part = head.forward_parts(hidden, padding, text["letters"], text["voice"], text["text_padding"],
-                                          letter[None], text["line"], text["position"])[ta.LEAD]
+                part = head.forward_parts(
+                    hidden,
+                    padding,
+                    text["letters"],
+                    text["voice"],
+                    text["text_padding"],
+                    letter[None],
+                    text["line"],
+                    text["position"],
+                )[ta.LEAD]
                 token = part["token"][0] if "token" in part else torch.log_softmax(part["combined"][0][:, 1:], -1)
             bg = getattr(out, "background_logits", None)
             bg = (1 - torch.softmax(bg[0].float(), -1)[:, BLANK]) if bg is not None else None
@@ -121,21 +156,45 @@ class DecodedEval:
         for index, w in enumerate(words):
             lines.setdefault(w["line"], [index, index + 1])[1] = index + 1
         ranges = [tuple(v) for v in lines.values()]
-        plain = align_with_source_priors(adjusted, groups, blank=BLANK, frame_shift_seconds=proto.FRAME, source_priors=[])
-        floors = paced_minimum_frames(groups, plain, ranges, ratio=s3.PACE, letter_cap=s3.LETTER_CAP,
-                                      group_cap=s3.GROUP_CAP, pause_frames=s3.PAUSE, vowel_ids=s3.VOWELS)
+        plain = align_with_source_priors(
+            adjusted, groups, blank=BLANK, frame_shift_seconds=proto.FRAME, source_priors=[]
+        )
+        floors = paced_minimum_frames(
+            groups,
+            plain,
+            ranges,
+            ratio=s3.PACE,
+            letter_cap=s3.LETTER_CAP,
+            group_cap=s3.GROUP_CAP,
+            pause_frames=s3.PAUSE,
+            vowel_ids=s3.VOWELS,
+        )
         letter_cols = [letter for g in groups for letter in g]
         owner = [k for k, g in enumerate(groups) for _ in g]
-        augmented = torch.cat((adjusted[:, letter_cols] + self.bonus * share[:, owner], adjusted[:, BLANK:BLANK + 1]), 1)
+        augmented = torch.cat(
+            (adjusted[:, letter_cols] + self.bonus * share[:, owner], adjusted[:, BLANK : BLANK + 1]), 1
+        )
         pseudo, cursor = [], 0
         for g in groups:
             pseudo.append(list(range(cursor, cursor + len(g))))
             cursor += len(g)
-        out = align_with_minimum_durations(augmented, pseudo, blank=len(letter_cols), minimum_frames=floors,
-                                           blank_free_tokens=True, line_ranges=ranges, in_line_gap_cost=self.gap_cost)
+        out = align_with_minimum_durations(
+            augmented,
+            pseudo,
+            blank=len(letter_cols),
+            minimum_frames=floors,
+            blank_free_tokens=True,
+            line_ranges=ranges,
+            in_line_gap_cost=self.gap_cost,
+        )
         return np.array([float(exact[g[0].start]) for g in out])
 
     def run(self, model, device) -> dict:
+        """Align every song with ``model`` and return the decoded-timing metrics (without the ``eval_`` prefix).
+
+        Runs under bf16 autocast in eval mode and restores training mode. Songs whose stitched frame count disagrees
+        with the emission, or whose decode raises, are counted in ``decoded_failed`` instead of failing the eval.
+        """
         was_training = model.training
         model.eval()
         plain, bonus, scores, truth, failed = [], [], [], [], 0
@@ -158,14 +217,19 @@ class DecodedEval:
                             plain.append((s3.start_times(spans, exact) - reference) * 1000)
                             if tokens is not None:
                                 record = self.song_text[song["id"]]
-                                column = {(int(record["line"][j]), round(float(record["start"][j]), 3)): j
-                                          for j in range(len(record["voice"])) if record["voice"][j] == ta.LEAD}
+                                column = {
+                                    (int(record["line"][j]), round(float(record["start"][j]), 3)): j
+                                    for j in range(len(record["voice"]))
+                                    if record["voice"][j] == ta.LEAD
+                                }
                                 share = torch.zeros((tokens.shape[0], len(words)))
                                 for k, w in enumerate(words):
                                     j = column.get((int(w["line"]), round(float(w["start"]), 3)))
                                     if j is not None:
                                         share[:, k] = tokens[:, j]
-                                bonus.append((self._bonus_decode(letters, audio, words, share, exact) - reference) * 1000)
+                                bonus.append(
+                                    (self._bonus_decode(letters, audio, words, share, exact) - reference) * 1000
+                                )
                         if backing is not None:
                             times = np.asarray(exact, dtype=np.float64)
                             sung = np.zeros(len(times), dtype=bool)

@@ -163,10 +163,12 @@ NASAL = {"ㄱ": "ㅇ", "ㄷ": "ㄴ", "ㅂ": "ㅁ"}
 
 
 def is_syllable(char: str) -> bool:
+    """True for one precomposed Hangul syllable block (가..힣)."""
     return len(char) == 1 and "가" <= char <= "힣"
 
 
 def decompose(char: str) -> list[str]:
+    """[onset, vowel, coda] jamo of a precomposed Hangul syllable; the coda is '' when there is none."""
     code = ord(char) - 0xAC00
     return [ONSETS[code // 588], VOWELS[code % 588 // 28], CODAS[code % 28]]
 
@@ -238,11 +240,7 @@ def romanize_run(text: str, v2: bool = False) -> list[str]:
     result = []
     for index, (onset, vowel, coda) in enumerate(syllables):
         # ㄹ after an ㄹ coda is a lateral: 신라 → sil+la.
-        roman_onset = (
-            "l"
-            if onset == "ㄹ" and index and syllables[index - 1][2] == "ㄹ"
-            else ONSET_ROMAN[onset]
-        )
+        roman_onset = "l" if onset == "ㄹ" and index and syllables[index - 1][2] == "ㄹ" else ONSET_ROMAN[onset]
         roman_vowel = VOWEL_ROMAN[vowel]
         if v2 and vowel == "ㅢ":
             if onset != "ㅇ":
@@ -264,9 +262,7 @@ def apply_to_items(items: list[dict], v2: bool = False) -> list[dict]:
         end = index
         while end < len(items) and is_syllable(str(items[end].get("orig", ""))):
             end += 1
-        for item, pron in zip(
-            items[index:end], romanize_run("".join(i["orig"] for i in items[index:end]), v2)
-        ):
+        for item, pron in zip(items[index:end], romanize_run("".join(i["orig"] for i in items[index:end]), v2)):
             item["pron"] = pron
             item["pronunciation"] = VERSION_V2 if v2 else VERSION
         index = end

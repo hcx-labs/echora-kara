@@ -8,6 +8,7 @@ of the recording.
 
 usage: python -m echora_kara.data.filter_label_quality --source DIR/compact --output DIR/compact_q005 --min 0.05
 """
+
 import argparse
 import json
 import shutil
@@ -15,6 +16,8 @@ from pathlib import Path
 
 
 def main() -> None:
+    """Write the filtered manifest to ``--output``: train/validation without low-score songs, ``dropped_<split>.txt``
+    id lists, test and vocab copied verbatim, and a ``summary.json`` of the counts."""
     parser = argparse.ArgumentParser()
     parser.add_argument("--source", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)

@@ -13,6 +13,7 @@ Fragments are identified by their measured source span (start, end); a trim move
 and the weak proportional per-character timings inside the fragment are rescaled to the new span,
 so ``integrity.check_row`` still sees every unit inside its single source fragment.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -24,21 +25,26 @@ FRAME = 0.02
 
 @dataclass(frozen=True)
 class TrimConfig:
-    threshold: float = 0.35      # scaled activity below this is "not singing"
+    """Thresholds of the tail trim; frame counts are on the 20 ms label clock."""
+
+    threshold: float = 0.35  # scaled activity below this is "not singing"
     min_inactive_frames: int = 3  # at least 60 ms of inactive tail before anything is trimmed
-    margin_frames: int = 1        # frames kept after the last active one (decay)
-    min_keep: float = 0.4         # never cut a fragment below this share of its length
+    margin_frames: int = 1  # frames kept after the last active one (decay)
+    min_keep: float = 0.4  # never cut a fragment below this share of its length
     min_frames_per_letter: int = 1
 
 
 def fragment_key(unit: dict) -> tuple[float, float] | None:
+    """(start, end) of a unit's single measured source span in seconds, rounded to 0.1 ms; None unless exactly one."""
     spans = unit.get("source_spans") or []
     if len(spans) != 1:
         return None
     return (round(float(spans[0]["start"]), 4), round(float(spans[0]["end"]), 4))
 
 
-def plan_trims(units: list[dict], activity: np.ndarray, config: TrimConfig = TrimConfig()) -> dict[tuple[float, float], float]:
+def plan_trims(
+    units: list[dict], activity: np.ndarray, config: TrimConfig = TrimConfig()
+) -> dict[tuple[float, float], float]:
     """{(span start, span end): new end} for every supervised fragment whose tail is inactive."""
     letters: dict[tuple[float, float], int] = {}
     for unit in units:
@@ -69,8 +75,9 @@ def plan_trims(units: list[dict], activity: np.ndarray, config: TrimConfig = Tri
     return trims
 
 
-def apply_trims(lines: list[list[dict]], trims: dict[tuple[float, float], float], label: str,
-                method: str) -> tuple[list[list[dict]], dict]:
+def apply_trims(
+    lines: list[list[dict]], trims: dict[tuple[float, float], float], label: str, method: str
+) -> tuple[list[list[dict]], dict]:
     """Shorten the fragments in ``trims`` (``label``: "blank" or "ignore"); returns (lines, stats)."""
     if label not in ("blank", "ignore"):
         raise ValueError("label must be blank or ignore")
@@ -90,8 +97,12 @@ def apply_trims(lines: list[list[dict]], trims: dict[tuple[float, float], float]
             span["provider_end"] = span["end"]
             span["end"] = new_end
             scale = (new_end - old_start) / (old_end - old_start)
-            changed = {**unit, "source_spans": [span], "provider_end": unit["end"],
-                       "tail_trim": {"method": method, "seconds": round(old_end - new_end, 3), "label": label}}
+            changed = {
+                **unit,
+                "source_spans": [span],
+                "provider_end": unit["end"],
+                "tail_trim": {"method": method, "seconds": round(old_end - new_end, 3), "label": label},
+            }
             if not unit.get("ignore"):
                 changed["start"] = round(old_start + (unit["start"] - old_start) * scale, 6)
                 changed["end"] = round(old_start + (unit["end"] - old_start) * scale, 6)
@@ -108,10 +119,20 @@ def apply_trims(lines: list[list[dict]], trims: dict[tuple[float, float], float]
                 stats["fragments_trimmed"] += 1
                 stats["seconds_trimmed"] += old_end - new_end
                 if label == "ignore":
-                    masks.append({"start": new_end, "end": old_end, "text": "", "source_text": unit.get("source_text", ""),
-                                  "ignore": True, "soft_ignore": True, "normalization_error": "trimmed_tail_estimate",
-                                  "vocal_role": unit.get("vocal_role", "lead"), "tail_trim": changed["tail_trim"],
-                                  "source_spans": [{"start": new_end, "end": old_end, "text": span.get("text", "")}]})
+                    masks.append(
+                        {
+                            "start": new_end,
+                            "end": old_end,
+                            "text": "",
+                            "source_text": unit.get("source_text", ""),
+                            "ignore": True,
+                            "soft_ignore": True,
+                            "normalization_error": "trimmed_tail_estimate",
+                            "vocal_role": unit.get("vocal_role", "lead"),
+                            "tail_trim": changed["tail_trim"],
+                            "source_spans": [{"start": new_end, "end": old_end, "text": span.get("text", "")}],
+                        }
+                    )
         result.append(sorted(out + masks, key=lambda u: (u["start"], u["end"])))
     stats["seconds_trimmed"] = round(stats["seconds_trimmed"], 3)
     return result, stats

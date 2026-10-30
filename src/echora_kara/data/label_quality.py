@@ -38,6 +38,7 @@ recomputed with the labels shifted by that lag rises by at least 0.05 (an indepe
 wrong shift lowers it). ``offset_s`` is positive when the audio is later than the labels. The
 manifest builder drops confirmed songs with ``--offset-gate drop`` and records the rest.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -65,15 +66,35 @@ LETTERS = "abcdefghijklmnopqrstuvwxyz"
 
 
 def decode(path: Path) -> np.ndarray:
-    command = ["ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error", "-i", str(path), "-vn",
-               "-ac", "1", "-ar", str(SAMPLE_RATE), "-f", "f32le", "pipe:1"]
+    """Decode an audio file with ffmpeg to 16 kHz mono float32 samples."""
+    command = [
+        "ffmpeg",
+        "-nostdin",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-i",
+        str(path),
+        "-vn",
+        "-ac",
+        "1",
+        "-ar",
+        str(SAMPLE_RATE),
+        "-f",
+        "f32le",
+        "pipe:1",
+    ]
     result = subprocess.run(command, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     return np.frombuffer(result.stdout, dtype=np.float32).copy()
 
 
 def _mel_filterbank(n_fft: int) -> np.ndarray:
-    def hz_to_mel(f): return 2595 * np.log10(1 + f / 700)
-    def mel_to_hz(m): return 700 * (10 ** (m / 2595) - 1)
+    def hz_to_mel(f):
+        return 2595 * np.log10(1 + f / 700)
+
+    def mel_to_hz(m):
+        return 700 * (10 ** (m / 2595) - 1)
+
     mels = np.linspace(hz_to_mel(50), hz_to_mel(SAMPLE_RATE / 2), N_MELS + 2)
     bins = np.floor((n_fft + 1) * mel_to_hz(mels) / SAMPLE_RATE).astype(int)
     bank = np.zeros((N_MELS, n_fft // 2 + 1))
@@ -111,6 +132,7 @@ def frame_features(waveform: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
 
 
 def kmeans(features: np.ndarray, k: int, seed: int = 0, iterations: int = 15) -> np.ndarray:
+    """Cluster index per row of ``features`` after a fixed number of Lloyd iterations from random centres."""
     rng = np.random.default_rng(seed)
     k = min(k, len(features))
     centres = features[rng.choice(len(features), k, replace=False)]
@@ -142,8 +164,9 @@ def frame_letters(units: list[dict], frames: int) -> np.ndarray:
     return letters
 
 
-def mutual_information(a: np.ndarray, b: np.ndarray, na: int = len(LETTERS),
-                       nb: int = CLUSTERS) -> tuple[float, np.ndarray, np.ndarray, np.ndarray]:
+def mutual_information(
+    a: np.ndarray, b: np.ndarray, na: int = len(LETTERS), nb: int = CLUSTERS
+) -> tuple[float, np.ndarray, np.ndarray, np.ndarray]:
     """Normalised MI of two label arrays plus the full PMI table (for per-line scores)."""
     joint = np.zeros((na, nb))
     np.add.at(joint, (a, b), 1)
@@ -158,6 +181,7 @@ def mutual_information(a: np.ndarray, b: np.ndarray, na: int = len(LETTERS),
 
 
 def dtw(a: np.ndarray, b: np.ndarray) -> float:
+    """DTW distance between two feature sequences (Euclidean frame cost), normalised by their summed length."""
     cost = np.sqrt(((a[:, None, :] - b[None, :, :]) ** 2).sum(-1))
     n, m = cost.shape
     acc = np.full((n + 1, m + 1), np.inf)
@@ -170,15 +194,18 @@ def dtw(a: np.ndarray, b: np.ndarray) -> float:
 
 
 def auc(positive: np.ndarray, negative: np.ndarray) -> float:
+    """ROC AUC of ``positive`` over ``negative`` scores by rank sum; 0.5 when either is empty."""
     if not len(positive) or not len(negative):
         return 0.5
     ranks = np.argsort(np.argsort(np.concatenate([positive, negative]))) + 1
-    return float((ranks[:len(positive)].sum() - len(positive) * (len(positive) + 1) / 2)
-                 / (len(positive) * len(negative)))
+    return float(
+        (ranks[: len(positive)].sum() - len(positive) * (len(positive) + 1) / 2) / (len(positive) * len(negative))
+    )
 
 
-def score_song(features: np.ndarray, energy: np.ndarray, lines: list[list[dict]],
-               rng_seed: int = 0, max_pairs: int = 60) -> dict:
+def score_song(
+    features: np.ndarray, energy: np.ndarray, lines: list[list[dict]], rng_seed: int = 0, max_pairs: int = 60
+) -> dict:
     """All scores for one song from its frame features and its per-line timed units."""
     frames = len(features)
     units = [unit for line in lines for unit in line if unit.get("vocal_role") != "background"]
@@ -192,7 +219,7 @@ def score_song(features: np.ndarray, energy: np.ndarray, lines: list[list[dict]]
     # Activity: labelled frames vs unlabelled frames between the first and last labelled frame.
     first, last = np.flatnonzero(labelled)[[0, -1]]
     inside = np.zeros(frames, dtype=bool)
-    inside[first:last + 1] = True
+    inside[first : last + 1] = True
     activity = auc(energy[labelled], energy[inside & ~labelled])
     # WACS: repeated unit texts (lead units only), DTW against each other and against random units.
     rng = np.random.default_rng(rng_seed)
@@ -200,16 +227,30 @@ def score_song(features: np.ndarray, energy: np.ndarray, lines: list[list[dict]]
     usable = [u for u in units if u.get("text") and not u.get("ignore") and (u["end"] - u["start"]) >= 0.12]
     for unit in usable:
         by_text.setdefault(unit["text"], []).append(unit)
-    pairs = [(group[i], group[j]) for group in by_text.values() if len(group) > 1
-             for i in range(len(group)) for j in range(i + 1, len(group))]
+    pairs = [
+        (group[i], group[j])
+        for group in by_text.values()
+        if len(group) > 1
+        for i in range(len(group))
+        for j in range(i + 1, len(group))
+    ]
     rng.shuffle(pairs)
     same, other = [], []
 
     def clip(unit):
-        return features[int(round(unit["start"] / FRAME)):max(int(round(unit["end"] / FRAME)), int(round(unit["start"] / FRAME)) + 1)]
+        return features[
+            int(round(unit["start"] / FRAME)) : max(
+                int(round(unit["end"] / FRAME)), int(round(unit["start"] / FRAME)) + 1
+            )
+        ]
+
     for a, b in pairs[:max_pairs]:
         same.append(dtw(clip(a), clip(b)))
-        candidates = [u for u in usable if u["text"] != a["text"] and abs((u["end"] - u["start"]) - (a["end"] - a["start"])) < 0.15]
+        candidates = [
+            u
+            for u in usable
+            if u["text"] != a["text"] and abs((u["end"] - u["start"]) - (a["end"] - a["start"])) < 0.15
+        ]
         if candidates:
             other.append(dtw(clip(a), clip(candidates[rng.integers(len(candidates))])))
     wacs = float(np.mean(same) / np.mean(other)) if same and other and np.mean(other) > 0 else None
@@ -226,9 +267,15 @@ def score_song(features: np.ndarray, energy: np.ndarray, lines: list[list[dict]]
         line_scores = [None if v is None else 0.0 for v in line_scores]
     parts = [nmi, (1 - min(wacs, 1.0)) if wacs is not None else None, 2 * (activity - 0.5)]
     parts = [p for p in parts if p is not None]
-    return {**result, "pcmi": round(nmi, 4), "wacs": round(wacs, 4) if wacs is not None else None,
-            "activity_auc": round(activity, 4), "repeated_pairs": len(same),
-            "score": round(float(min(1.0, max(0.0, float(np.mean(parts))))), 4), "lines": line_scores}
+    return {
+        **result,
+        "pcmi": round(nmi, 4),
+        "wacs": round(wacs, 4) if wacs is not None else None,
+        "activity_auc": round(activity, 4),
+        "repeated_pairs": len(same),
+        "score": round(float(min(1.0, max(0.0, float(np.mean(parts))))), 4),
+        "lines": line_scores,
+    }
 
 
 def lead_indicator(lines: list[list[dict]], frames: int) -> np.ndarray:
@@ -239,7 +286,7 @@ def lead_indicator(lines: list[list[dict]], frames: int) -> np.ndarray:
             if unit.get("ignore") or unit.get("vocal_role") == "background" or not unit.get("text"):
                 continue
             first, stop = int(unit["start"] / FRAME), int(unit["end"] / FRAME) + 1
-            indicator[max(0, first):min(frames, stop)] = 1.0
+            indicator[max(0, first) : min(frames, stop)] = 1.0
     return indicator
 
 
@@ -249,16 +296,17 @@ def activity_auc_of(energy: np.ndarray, indicator: np.ndarray) -> float | None:
     if len(labelled) < 100:
         return None
     inside = np.zeros(len(energy), dtype=bool)
-    inside[labelled[0]:labelled[-1] + 1] = True
+    inside[labelled[0] : labelled[-1] + 1] = True
     return auc(energy[indicator > 0], energy[inside & (indicator == 0)])
 
 
 def shift_indicator(indicator: np.ndarray, frames: int) -> np.ndarray:
+    """Indicator moved later by ``frames`` (earlier when negative), zero-filled at the vacated end."""
     shifted = np.zeros_like(indicator)
     if frames >= 0:
-        shifted[frames:] = indicator[:len(indicator) - frames]
+        shifted[frames:] = indicator[: len(indicator) - frames]
     else:
-        shifted[:len(indicator) + frames] = indicator[-frames:]
+        shifted[: len(indicator) + frames] = indicator[-frames:]
     return shifted
 
 
@@ -271,8 +319,15 @@ def offset_search(energy: np.ndarray, lines: list[list[dict]], max_lag_seconds: 
     """
     frames = len(energy)
     indicator = lead_indicator(lines, frames)
-    empty = {"offset_s": None, "offset_ratio": None, "offset_corr0": None, "offset_auc0": None,
-             "offset_auc_at": None, "offset_flagged": False, "offset_confirmed": False}
+    empty = {
+        "offset_s": None,
+        "offset_ratio": None,
+        "offset_corr0": None,
+        "offset_auc0": None,
+        "offset_auc_at": None,
+        "offset_flagged": False,
+        "offset_confirmed": False,
+    }
     if indicator.sum() < 100 or frames < 200:
         return empty
     kernel = np.ones(10) / 10  # 200 ms smoothing
@@ -282,7 +337,7 @@ def offset_search(energy: np.ndarray, lines: list[list[dict]], max_lag_seconds: 
     max_lag = min(int(max_lag_seconds / FRAME), frames - 1)
     size = 1 << int(np.ceil(np.log2(2 * frames)))
     correlation = np.fft.irfft(np.fft.rfft(smooth, size) * np.conj(np.fft.rfft(centred, size)), size)
-    correlation = np.concatenate([correlation[-max_lag:], correlation[:max_lag + 1]])
+    correlation = np.concatenate([correlation[-max_lag:], correlation[: max_lag + 1]])
     lags = np.arange(-max_lag, max_lag + 1)
     correlation = correlation / np.maximum(frames - np.abs(lags), 1)
     zero = max_lag
@@ -294,10 +349,15 @@ def offset_search(energy: np.ndarray, lines: list[list[dict]], max_lag_seconds: 
     auc0 = activity_auc_of(energy, indicator)
     auc_at = activity_auc_of(energy, shift_indicator(indicator, lag_frames)) if flagged else None
     confirmed = bool(flagged and auc0 is not None and auc_at is not None and auc_at - auc0 >= OFFSET_MIN_AUC_GAIN)
-    return {"offset_s": round(lag_frames * FRAME, 2), "offset_ratio": round(ratio, 3) if ratio not in (None, float("inf")) else ratio,
-            "offset_corr0": round(corr0, 4), "offset_auc0": round(auc0, 3) if auc0 is not None else None,
-            "offset_auc_at": round(auc_at, 3) if auc_at is not None else None,
-            "offset_flagged": bool(flagged), "offset_confirmed": confirmed}
+    return {
+        "offset_s": round(lag_frames * FRAME, 2),
+        "offset_ratio": round(ratio, 3) if ratio not in (None, float("inf")) else ratio,
+        "offset_corr0": round(corr0, 4),
+        "offset_auc0": round(auc0, 3) if auc0 is not None else None,
+        "offset_auc_at": round(auc_at, 3) if auc_at is not None else None,
+        "offset_flagged": bool(flagged),
+        "offset_confirmed": confirmed,
+    }
 
 
 def timings_digest(lines: list[list[dict]]) -> str:
@@ -305,12 +365,17 @@ def timings_digest(lines: list[list[dict]]) -> str:
     masks), so a cached score is reused whenever the labels are byte-identical, whatever the
     normalizer or builder version string says."""
     import hashlib
-    parts = [f"{u['start']:.3f},{u['end']:.3f},{u.get('text') or ''},{int(bool(u.get('ignore')))},{u.get('vocal_role') or 'lead'}"
-             for line in lines for u in line]
+
+    parts = [
+        f"{u['start']:.3f},{u['end']:.3f},{u.get('text') or ''},{int(bool(u.get('ignore')))},{u.get('vocal_role') or 'lead'}"
+        for line in lines
+        for u in line
+    ]
     return hashlib.sha256("|".join(parts).encode()).hexdigest()[:24]
 
 
 def score_file(path: Path, lines: list[list[dict]]) -> dict:
+    """Decode one song and return its ``score_song`` scores merged with its ``offset_search`` result."""
     features, energy = frame_features(decode(path))
     return {**score_song(features, energy, lines), **offset_search(energy, lines)}
 
@@ -318,7 +383,9 @@ def score_file(path: Path, lines: list[list[dict]]) -> dict:
 # ---------------------------------------------------------------------------------------------
 # Metric validation: perturbations should lower the scores.
 
+
 def shifted(lines: list[list[dict]], seconds: float) -> list[list[dict]]:
+    """Copy of ``lines`` with every unit moved by ``seconds``."""
     return [[{**u, "start": u["start"] + seconds, "end": u["end"] + seconds} for u in line] for line in lines]
 
 
@@ -334,38 +401,61 @@ def shuffled_lines(lines: list[list[dict]], seed: int = 0) -> list[list[dict]]:
         slot_start, slot_end = min(u["start"] for u in slot), max(u["end"] for u in slot)
         src_start, src_end = min(u["start"] for u in source), max(u["end"] for u in source)
         scale = (slot_end - slot_start) / max(src_end - src_start, 1e-3)
-        result.append([{**u, "start": slot_start + (u["start"] - src_start) * scale,
-                        "end": slot_start + (u["end"] - src_start) * scale} for u in source])
+        result.append(
+            [
+                {
+                    **u,
+                    "start": slot_start + (u["start"] - src_start) * scale,
+                    "end": slot_start + (u["end"] - src_start) * scale,
+                }
+                for u in source
+            ]
+        )
     return result
 
 
 def perturb(args) -> None:
-    rows = [json.loads(line) for line in Path(args.manifest).open() if line.strip()][:args.songs]
+    """Score the first ``--songs`` manifest songs as labelled, shifted by 0.5 s and 1 s and with shuffled lines, and
+    print the mean scores per variant."""
+    rows = [json.loads(line) for line in Path(args.manifest).open() if line.strip()][: args.songs]
     root = Path(args.root)
     table = {"original": [], "shift_0.5s": [], "shift_1s": [], "shuffled_lines": []}
     for row in rows:
         features, energy = frame_features(decode(root / row["audio"]))
         lines = row["timings"]
-        for name, variant in (("original", lines), ("shift_0.5s", shifted(lines, 0.5)),
-                              ("shift_1s", shifted(lines, 1.0)), ("shuffled_lines", shuffled_lines(lines))):
+        for name, variant in (
+            ("original", lines),
+            ("shift_0.5s", shifted(lines, 0.5)),
+            ("shift_1s", shifted(lines, 1.0)),
+            ("shuffled_lines", shuffled_lines(lines)),
+        ):
             table[name].append(score_song(features, energy, variant))
     print(f"{'variant':15s} {'pcmi':>7s} {'wacs':>7s} {'auc':>7s} {'score':>7s}   (means over {len(rows)} songs)")
     for name, scores in table.items():
+
         def mean(key):
             values = [s[key] for s in scores if s.get(key) is not None]
             return f"{np.mean(values):7.3f}" if values else "    n/a"
+
         print(f"{name:15s} {mean('pcmi')} {mean('wacs')} {mean('activity_auc')} {mean('score')}")
     original = np.array([s["score"] for s in table["original"] if s["score"] is not None])
-    worst = min(np.array([s["score"] for s in table[k] if s["score"] is not None]).mean() for k in table if k != "original")
-    print(f"original score percentiles 5/25/50: {np.percentile(original, [5, 25, 50]).round(3).tolist()}; "
-          f"worst perturbed mean {worst:.3f}")
+    worst = min(
+        np.array([s["score"] for s in table[k] if s["score"] is not None]).mean() for k in table if k != "original"
+    )
+    print(
+        f"original score percentiles 5/25/50: {np.percentile(original, [5, 25, 50]).round(3).tolist()}; "
+        f"worst perturbed mean {worst:.3f}"
+    )
 
 
 def main() -> None:
+    """Command-line entry point; the only command is ``perturb``."""
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="command", required=True)
     p = sub.add_parser("perturb", help="score sampled manifest songs under timing perturbations")
-    p.add_argument("manifest"); p.add_argument("--root", required=True); p.add_argument("--songs", type=int, default=30)
+    p.add_argument("manifest")
+    p.add_argument("--root", required=True)
+    p.add_argument("--songs", type=int, default=30)
     p.set_defaults(run=perturb)
     args = parser.parse_args()
     args.run(args)

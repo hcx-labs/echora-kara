@@ -5,6 +5,7 @@ The existing TTML builder supplies no override, so defaults to ``auto``;
 callers reproducing an explicit inference override may pass ``language``.
 This module does not guess a different transliteration.
 """
+
 from __future__ import annotations
 
 import functools
@@ -39,6 +40,8 @@ INFERENCE_LANGUAGES_V3 = INFERENCE_LANGUAGES_V2 | label_rules.NON_LATIN_SCRIPT_L
 
 
 def normalizer_version(rules: str | None = None) -> str:
+    """Version string recorded with labels made under ``rules`` (default ``LABEL_RULES``): the Korean and script
+    romanization versions, plus the label-rules version and name for v2 and later."""
     rules = label_rules.resolve(rules if rules is not None else LABEL_RULES)
     if not rules.v2:
         return f"{korean_pronunciation.VERSION}+{script_romanization.VERSION}"
@@ -49,6 +52,8 @@ NORMALIZER_VERSION = normalizer_version("v1")
 
 
 class AcousticToken(TypedDict):
+    """One acoustic token of a lyric line: its a-z label, its surface text and the normalizer item type."""
+
     text: str
     surface: str
     normalizer_type: int
@@ -66,8 +71,9 @@ def inference_language(language: str | None = None, rules: str | None = None) ->
     because the v2 labels depend on them.
     """
     selected = label_rules.resolve(rules if rules is not None else LABEL_RULES)
-    allowed = (INFERENCE_LANGUAGES_V3 if selected.v3 else
-               INFERENCE_LANGUAGES_V2 if selected.v2 else INFERENCE_LANGUAGES_V1)
+    allowed = (
+        INFERENCE_LANGUAGES_V3 if selected.v3 else INFERENCE_LANGUAGES_V2 if selected.v2 else INFERENCE_LANGUAGES_V1
+    )
     return language if language in allowed else "auto"
 
 
@@ -108,11 +114,13 @@ def acoustic_tokens(text: str, language: str | None = None, rules: str | None = 
             continue
         if not _LABEL.fullmatch(pronunciation):
             raise NormalizationError(f"unsafe_pronunciation:{pronunciation!r}")
-        tokens.append({
-            "text": pronunciation,
-            "surface": str(item.get("orig", "")),
-            "normalizer_type": int(item.get("type", -1)),
-        })
+        tokens.append(
+            {
+                "text": pronunciation,
+                "surface": str(item.get("orig", "")),
+                "normalizer_type": int(item.get("type", -1)),
+            }
+        )
     if not tokens:
         raise NormalizationError("no_acoustic_tokens")
     return tokens
@@ -125,13 +133,22 @@ _KANA_ALTERNATES = {"は": {"ha", "wa"}, "へ": {"he", "e"}, "を": {"wo", "o"}}
 _SOKUON = "っッ"
 _CONSONANTS = "bcdfghjkmnprstwyz"
 # Rendaku and handakuten inside compounds: 言葉 koto+ba, 一杯 ip+pai.
-_COMPOUND_ONSETS = (("sh", "j"), ("ch", "j"), ("ts", "z"), ("k", "g"), ("s", "z"), ("t", "d"),
-                    ("h", "b"), ("h", "p"), ("f", "b"), ("f", "p"))
+_COMPOUND_ONSETS = (
+    ("sh", "j"),
+    ("ch", "j"),
+    ("ts", "z"),
+    ("k", "g"),
+    ("s", "z"),
+    ("t", "d"),
+    ("h", "b"),
+    ("h", "p"),
+    ("f", "b"),
+    ("f", "p"),
+)
 _SOKUON_TAILS = ("tsu", "chi", "ku", "ki")
 
 
-DICTIONARY_DIR = Path(os.environ.get(
-    "ECHORA_KARA_DICTIONARY_DIR", Path(__file__).resolve().parent / "dictionaries"))
+DICTIONARY_DIR = Path(os.environ.get("ECHORA_KARA_DICTIONARY_DIR", Path(__file__).resolve().parent / "dictionaries"))
 
 
 def _is_kana(char: str) -> bool:
@@ -148,13 +165,37 @@ def _is_silent(char: str) -> bool:
 
 
 # Letters the normalizer may spell differently: garçons → garsons, fällt → faellt.
-_LATIN_SPELLINGS = {"ç": {"s"}, "ä": {"ae"}, "ö": {"oe"}, "ü": {"ue"}, "ß": {"ss", "s"},
-                    "æ": {"ae"}, "œ": {"oe"}, "ø": {"o", "oe"}, "ñ": {"ny"}}
+_LATIN_SPELLINGS = {
+    "ç": {"s"},
+    "ä": {"ae"},
+    "ö": {"oe"},
+    "ü": {"ue"},
+    "ß": {"ss", "s"},
+    "æ": {"ae"},
+    "œ": {"oe"},
+    "ø": {"o", "oe"},
+    "ñ": {"ny"},
+}
 # v2: Turkish ı/ş/ğ and a few more letters need an anchor spelling, or Turkish tokens are masked at
 # syllable timing boundaries; ç may read ch under the Turkish rules.
-_LATIN_SPELLINGS_V2 = {**_LATIN_SPELLINGS, "ç": {"s", "ch"}, "ı": {"i"}, "ş": {"sh", "s"}, "ğ": {"g", ""},
-                       "đ": {"d"}, "ł": {"l", "w"}, "ŋ": {"ng", "n"}, "ı̇": {"i"}, "ñ": {"ny", "n"},
-                       "ŧ": {"t"}, "ħ": {"h"}, "þ": {"th"}, "ð": {"d", "dh"}, "ư": {"uw", "u"}, "ơ": {"ow", "o"}}
+_LATIN_SPELLINGS_V2 = {
+    **_LATIN_SPELLINGS,
+    "ç": {"s", "ch"},
+    "ı": {"i"},
+    "ş": {"sh", "s"},
+    "ğ": {"g", ""},
+    "đ": {"d"},
+    "ł": {"l", "w"},
+    "ŋ": {"ng", "n"},
+    "ı̇": {"i"},
+    "ñ": {"ny", "n"},
+    "ŧ": {"t"},
+    "ħ": {"h"},
+    "þ": {"th"},
+    "ð": {"d", "dh"},
+    "ư": {"uw", "u"},
+    "ơ": {"ow", "o"},
+}
 
 
 def _latin_readings(char: str, rules: str | None = None) -> frozenset[str]:
@@ -162,7 +203,9 @@ def _latin_readings(char: str, rules: str | None = None) -> frozenset[str]:
     lower = char.lower()
     folded = "".join(c for c in unicodedata.normalize("NFKD", lower) if not unicodedata.combining(c))
     readings = {folded} if len(folded) == 1 and "a" <= folded <= "z" else set()
-    table = _LATIN_SPELLINGS_V2 if label_rules.resolve(rules if rules is not None else LABEL_RULES).v2 else _LATIN_SPELLINGS
+    table = (
+        _LATIN_SPELLINGS_V2 if label_rules.resolve(rules if rules is not None else LABEL_RULES).v2 else _LATIN_SPELLINGS
+    )
     extra = table.get(lower, set())
     if not extra and table is _LATIN_SPELLINGS_V2:
         # Vietnamese tone-marked horn letters (ờ, ữ, ...) read like their toneless base (ơ, ư).
@@ -179,7 +222,9 @@ def _hiragana(kana: str) -> str:
 def _kana_readings(kana: str, language: str, rules: str = "v1") -> frozenset[str]:
     """Readings of one kana unit, from the same normalizer as inference."""
     try:
-        items = process_haruhi_line(kana, language, **({} if label_rules.resolve(rules).name == "v1" else {"rules": rules}))
+        items = process_haruhi_line(
+            kana, language, **({} if label_rules.resolve(rules).name == "v1" else {"rules": rules})
+        )
     except (AssertionError, IndexError, KeyError, TypeError, ValueError):
         items = []
     readings = set(_KANA_ALTERNATES.get(kana, ()))
@@ -227,6 +272,7 @@ def _furigana_entries(word: str) -> list[tuple[str, str]]:
 def _kanjidic_index() -> dict[str, tuple[str, ...]]:
     import gzip
     import xml.etree.ElementTree as ET
+
     index = {}
     with gzip.open(_dictionary_file("kanjidic2.xml.gz")) as source:
         for _, element in ET.iterparse(source):
@@ -249,6 +295,7 @@ def _kanjidic_index() -> dict[str, tuple[str, ...]]:
 def _kanji_dictionary_readings(char: str) -> tuple[str, ...]:
     """Every hiragana reading KANJIDIC2 and pykakasi list for one kanji."""
     from pykakasi.kanji import Kanwa
+
     entry = (Kanwa().load(char) or {}).get(char) or []
     return tuple(dict.fromkeys([*_kanjidic_index().get(char, ()), *(r for r, *_ in entry if r)]))
 
@@ -262,10 +309,15 @@ def _kanji_readings(char: str, compound_position: bool, language: str, rules: st
     variants = set(readings)
     for reading in readings:
         if compound_position:
-            variants |= {voiced + reading[len(plain):] for plain, voiced in _COMPOUND_ONSETS
-                         if reading.startswith(plain)}
-        variants |= {reading[:-len(tail)] + consonant for tail in _SOKUON_TAILS
-                     if reading.endswith(tail) and len(reading) > len(tail) for consonant in _CONSONANTS}
+            variants |= {
+                voiced + reading[len(plain) :] for plain, voiced in _COMPOUND_ONSETS if reading.startswith(plain)
+            }
+        variants |= {
+            reading[: -len(tail)] + consonant
+            for tail in _SOKUON_TAILS
+            if reading.endswith(tail) and len(reading) > len(tail)
+            for consonant in _CONSONANTS
+        }
     return frozenset(variants)
 
 
@@ -286,8 +338,11 @@ def _unique_split(units: list, readings: list, pron: str) -> list[tuple[int, int
                 solutions.append(pieces)
             return
         a, b = units[position][:2]
-        choices = readings[position] if readings[position] is not None else \
-            [pron[offset:end] for end in range(offset + 1, len(pron) + 1)]
+        choices = (
+            readings[position]
+            if readings[position] is not None
+            else [pron[offset:end] for end in range(offset + 1, len(pron) + 1)]
+        )
         for reading in choices:
             if pron.startswith(reading, offset):
                 search(position + 1, offset + len(reading), pieces + [(a, b, reading)])
@@ -296,8 +351,9 @@ def _unique_split(units: list, readings: list, pron: str) -> list[tuple[int, int
     return solutions[0] if len(solutions) == 1 else None
 
 
-def _anchor_pieces(orig: str, pron: str, language: str,
-                   per_kanji: bool = False, rules: str = "v1") -> list[tuple[int, int, str]] | None:
+def _anchor_pieces(
+    orig: str, pron: str, language: str, per_kanji: bool = False, rules: str = "v1"
+) -> list[tuple[int, int, str]] | None:
     """Split one grouped reading at fixed anchors, e.g. 曲がり角 → ma|ga|ri|kado.
 
     Kana have fixed readings, Latin letters spell themselves and punctuation
@@ -317,8 +373,12 @@ def _anchor_pieces(orig: str, pron: str, language: str,
         else:
             return None
         # A held ー is often timed on its own, so it stays a separate unit.
-        if units and units[-1][2] == kind and char != "ー" and (
-                char in _KANA_MODIFIERS if kind == "kana" else kind == "kanji" and not per_kanji):
+        if (
+            units
+            and units[-1][2] == kind
+            and char != "ー"
+            and (char in _KANA_MODIFIERS if kind == "kana" else kind == "kanji" and not per_kanji)
+        ):
             units[-1][1] = index + 1
         else:
             units.append([index, index + 1, kind])
@@ -370,8 +430,9 @@ def _furigana_pieces(orig: str, pron: str, language: str, rules: str = "v1") -> 
     return list(next(iter(found))) if len(found) == 1 else None
 
 
-def normalize_timed_line(text: str, spans: list[dict], max_chars: int = 6,
-                         language: str | None = None, rules: str | None = None) -> list[dict]:
+def normalize_timed_line(
+    text: str, spans: list[dict], max_chars: int = 6, language: str | None = None, rules: str | None = None
+) -> list[dict]:
     """Exact ordered orig mapping only; never fuzzy-match transformed surfaces.
 
     Never redistribute pronunciation over multiple source timing fragments.
@@ -383,31 +444,44 @@ def normalize_timed_line(text: str, spans: list[dict], max_chars: int = 6,
     if max_chars <= 0:
         raise ValueError("max_chars must be positive")
     for span in spans:
-        if not all(math.isfinite(span[k]) for k in ('start', 'end')) or not 0 <= span['start'] < span['end']:
-            raise NormalizationError('invalid_source_interval')
-        if not 0 <= span['char_start'] < span['char_end'] <= len(text) or text[span['char_start']:span['char_end']] != span['text']:
-            raise NormalizationError('invalid_source_offsets')
+        if not all(math.isfinite(span[k]) for k in ("start", "end")) or not 0 <= span["start"] < span["end"]:
+            raise NormalizationError("invalid_source_interval")
+        if (
+            not 0 <= span["char_start"] < span["char_end"] <= len(text)
+            or text[span["char_start"] : span["char_end"]] != span["text"]
+        ):
+            raise NormalizationError("invalid_source_offsets")
     items = []
     rules = label_rules.resolve(rules if rules is not None else LABEL_RULES).name
     selected_language = training_language(language, rules)
     normalizer = f"echora.fa_kara.process_haruhi_line:{selected_language}+{normalizer_version(rules)}"
 
     def masked(selected, reason):
-        return [{**s, "text": "", "source_text": s["text"], "display_text": text,
-                 "source_spans": [dict(s)], "ignore": True, "normalization_error": reason,
-                 "normalizer_items": items,
-                 "normalizer": normalizer}
-                for s in selected if s["end"] > s["start"]]
+        return [
+            {
+                **s,
+                "text": "",
+                "source_text": s["text"],
+                "display_text": text,
+                "source_spans": [dict(s)],
+                "ignore": True,
+                "normalization_error": reason,
+                "normalizer_items": items,
+                "normalizer": normalizer,
+            }
+            for s in selected
+            if s["end"] > s["start"]
+        ]
 
     try:
         items = _normalize_line(text, selected_language, rules)
     except (AssertionError, IndexError, KeyError, TypeError, ValueError) as error:
         return masked(spans, f"normalizer_error:{error}")
     # Includes punctuation and whitespace: dropped or rewritten orig is unsafe.
-    if any(not isinstance(i.get('orig'), str) for i in items) or "".join(i["orig"] for i in items) != text:
+    if any(not isinstance(i.get("orig"), str) for i in items) or "".join(i["orig"] for i in items) != text:
         return masked(spans, "ambiguous_surface_mapping")
-    if items and not items[0]['orig'] and items[0].get('pron'):
-        return masked(spans, 'unattributable_empty_surface')
+    if items and not items[0]["orig"] and items[0].get("pron"):
+        return masked(spans, "unattributable_empty_surface")
     # Empty surfaces continue the preceding glyph's reading. Group only for
     # source-span mapping; acoustic_tokens still exposes every mora separately.
     grouped = []
@@ -426,27 +500,32 @@ def normalize_timed_line(text: str, spans: list[dict], max_chars: int = 6,
     split_positioned = []
     unsafe_boundaries = set()
     for a, b, item in positioned:
-        cuts = sorted({s[key] for s in spans for key in ("char_start", "char_end")
-                       if a < s[key] < b})
+        cuts = sorted({s[key] for s in spans for key in ("char_start", "char_end") if a < s[key] < b})
         if cuts and not item.get("pron") and all(_is_silent(c) for c in item["orig"]):
             # Silent punctuation like ', ¿' may straddle two timed words.
             edges = [a, *cuts, b]
-            split_positioned += [(left, right, {**item, "orig": text[left:right]})
-                                 for left, right in zip(edges, edges[1:])]
+            split_positioned += [
+                (left, right, {**item, "orig": text[left:right]}) for left, right in zip(edges, edges[1:])
+            ]
             continue
         if cuts and item.get("pron"):
             if item["orig"].lower() == item["pron"] and len(item["orig"]) == len(item["pron"]):
                 edges = [a, *cuts, b]
                 for left, right in zip(edges, edges[1:]):
-                    split_positioned.append((left, right, {**item, "orig": text[left:right],
-                        "pron": item["pron"][left-a:right-a]}))
+                    split_positioned.append(
+                        (left, right, {**item, "orig": text[left:right], "pron": item["pron"][left - a : right - a]})
+                    )
                 continue
             # Grouped readings split safely only where anchors, a dictionary
             # word alignment or a unique combination of kanji readings fix them.
-            finders = (("anchor", lambda: _anchor_pieces(item["orig"], item["pron"], selected_language, rules=rules)),
-                       ("furigana_dictionary", lambda: _furigana_pieces(item["orig"], item["pron"], selected_language, rules)),
-                       ("kanji_dictionary", lambda: _anchor_pieces(
-                           item["orig"], item["pron"], selected_language, per_kanji=True, rules=rules)))
+            finders = (
+                ("anchor", lambda: _anchor_pieces(item["orig"], item["pron"], selected_language, rules=rules)),
+                ("furigana_dictionary", lambda: _furigana_pieces(item["orig"], item["pron"], selected_language, rules)),
+                (
+                    "kanji_dictionary",
+                    lambda: _anchor_pieces(item["orig"], item["pron"], selected_language, per_kanji=True, rules=rules),
+                ),
+            )
             for method, finder in finders:
                 pieces = finder()
                 if pieces and all(cut - a in {left for left, _, _ in pieces} for cut in cuts):
@@ -456,12 +535,20 @@ def normalize_timed_line(text: str, spans: list[dict], max_chars: int = 6,
             if pieces:
                 edges = [a, *cuts, b]
                 for left, right in zip(edges, edges[1:]):
-                    split_positioned.append((left, right, {**item, "orig": text[left:right],
-                        "pron": "".join(r for l, _, r in pieces if left <= a + l < right),
-                        "source_split": method}))
+                    split_positioned.append(
+                        (
+                            left,
+                            right,
+                            {
+                                **item,
+                                "orig": text[left:right],
+                                "pron": "".join(r for l, _, r in pieces if left <= a + l < right),
+                                "source_split": method,
+                            },
+                        )
+                    )
                 continue
-            unsafe_boundaries.update(k for k, s in enumerate(spans)
-                                     if a < s["char_end"] and b > s["char_start"])
+            unsafe_boundaries.update(k for k, s in enumerate(spans) if a < s["char_end"] and b > s["char_start"])
         split_positioned.append((a, b, item))
     positioned = split_positioned
     result = []
@@ -470,11 +557,19 @@ def normalize_timed_line(text: str, spans: list[dict], max_chars: int = 6,
         group = {remaining.pop(0)}
         touched = set()
         while True:
-            new_items = {j for j, (a, b, _) in enumerate(positioned)
-                         if any(a < spans[k]["char_end"] and b > spans[k]["char_start"] for k in group)}
-            new_group = {k for k in remaining if any(
-                positioned[j][0] < spans[k]["char_end"] and positioned[j][1] > spans[k]["char_start"]
-                for j in new_items)}
+            new_items = {
+                j
+                for j, (a, b, _) in enumerate(positioned)
+                if any(a < spans[k]["char_end"] and b > spans[k]["char_start"] for k in group)
+            }
+            new_group = {
+                k
+                for k in remaining
+                if any(
+                    positioned[j][0] < spans[k]["char_end"] and positioned[j][1] > spans[k]["char_start"]
+                    for j in new_items
+                )
+            }
             touched |= new_items
             if not new_group:
                 break
@@ -484,11 +579,15 @@ def normalize_timed_line(text: str, spans: list[dict], max_chars: int = 6,
         normalized = [positioned[j][2] for j in sorted(touched)]
         covered = {c for s in selected for c in range(s["char_start"], s["char_end"])}
         reason = "unattributable_source_boundary" if group & unsafe_boundaries or len(selected) > 1 else None
-        if any(c not in covered and not text[c].isspace()
-               for j in touched for c in range(positioned[j][0], positioned[j][1])):
+        if any(
+            c not in covered and not text[c].isspace()
+            for j in touched
+            for c in range(positioned[j][0], positioned[j][1])
+        ):
             reason = "untimed_surface"
         if any(s["end"] <= s["start"] for s in selected) or any(
-                abs(a["end"] - b["start"]) > 1e-6 for a, b in zip(selected, selected[1:])):
+            abs(a["end"] - b["start"]) > 1e-6 for a, b in zip(selected, selected[1:])
+        ):
             reason = "ambiguous_fragment_timing"
         for item in normalized:
             pron = item.get("pron", "")
@@ -503,11 +602,19 @@ def normalize_timed_line(text: str, spans: list[dict], max_chars: int = 6,
         start, end = selected[0]["start"], selected[-1]["end"]
         for offset in range(0, len(pronunciation), max_chars):
             right = min(offset + max_chars, len(pronunciation))
-            result.append({"start": start + (end-start)*offset/len(pronunciation),
-                           "end": start + (end-start)*right/len(pronunciation),
-                           "text": pronunciation[offset:right], "source_text": "".join(s["text"] for s in selected),
-                           "display_text": text, "source_spans": selected, "normalizer_items": normalized,
-                           "normalizer": normalizer,
-                           "timing_method": "weak_characters_within_source_fragment",
-                           "timing_quality": "weak", "measured_syllable_boundaries": False})
+            result.append(
+                {
+                    "start": start + (end - start) * offset / len(pronunciation),
+                    "end": start + (end - start) * right / len(pronunciation),
+                    "text": pronunciation[offset:right],
+                    "source_text": "".join(s["text"] for s in selected),
+                    "display_text": text,
+                    "source_spans": selected,
+                    "normalizer_items": normalized,
+                    "normalizer": normalizer,
+                    "timing_method": "weak_characters_within_source_fragment",
+                    "timing_quality": "weak",
+                    "measured_syllable_boundaries": False,
+                }
+            )
     return sorted(result, key=lambda unit: unit["start"])

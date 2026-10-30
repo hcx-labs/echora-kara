@@ -8,6 +8,7 @@ words are sung at once are supervised in both streams instead of ignored.
 
 A word that would need a third stream (two others still sung) is masked out.
 """
+
 from __future__ import annotations
 
 MIN_OVERLAP = 0.1  # seconds; shorter overlaps are treated as source timing noise
@@ -20,8 +21,7 @@ def assign_streams(tokens: list[dict], min_overlap: float = MIN_OVERLAP) -> tupl
     a single stream cannot supervise) is dropped: the overlapping word now has its own stream.
     """
     masks = [t for t in tokens if t.get("ignore") or not t.get("ids")]
-    words = sorted((t for t in tokens if not t.get("ignore") and t.get("ids")),
-                   key=lambda t: (t["start"], t["end"]))
+    words = sorted((t for t in tokens if not t.get("ignore") and t.get("ids")), key=lambda t: (t["start"], t["end"]))
     first, second, third = [], [], []
     first_end = second_end = float("-inf")
     for token in words:

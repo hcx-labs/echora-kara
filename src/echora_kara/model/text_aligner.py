@@ -22,6 +22,7 @@ chunk needs no prior idea of which lines it holds; the global Viterbi over the s
 Shared by the trainer, the harness and inference; nothing here imports
 transformers.
 """
+
 from __future__ import annotations
 
 import math
@@ -37,6 +38,8 @@ IMPOSSIBLE = -1e4  # score of a token column that does not belong to the voice
 
 @dataclass
 class TextAlignerConfig:
+    """Sizes and options of a ``TextAligner``; saved with the checkpoint (``to_dict``)."""
+
     frame_dim: int = 1024  # encoder hidden size (omniASR-300M)
     letter_dim: int = 30  # the encoder's CTC letter log-probabilities, appended to each frame (0: off)
     dim: int = 256
@@ -61,10 +64,13 @@ class TextAlignerConfig:
     qk_norm: bool = False
 
     def to_dict(self) -> dict:
+        """The config as a plain dict of its fields."""
         return asdict(self)
 
 
 def sinusoid(positions: torch.Tensor, dim: int) -> torch.Tensor:
+    """Sinusoidal encoding of ``positions`` (any shape) -> (..., dim): sines then cosines of ``dim // 2``
+    frequencies."""
     half = dim // 2
     scale = torch.exp(-math.log(10000.0) * torch.arange(half, device=positions.device) / half)
     angle = positions.float()[..., None] * scale
@@ -91,14 +97,17 @@ class TokenEmbedding(nn.Module):
 
 
 class CrossLayer(nn.Module):
+    """One frame-side block: pre-norm frame self-attention, cross-attention to the song's tokens, feed-forward."""
+
     def __init__(self, config: TextAlignerConfig):
         super().__init__()
         d, h = config.dim, config.heads
         self.self_norm, self.cross_norm, self.ff_norm = nn.LayerNorm(d), nn.LayerNorm(d), nn.LayerNorm(d)
         self.self_attention = nn.MultiheadAttention(d, h, dropout=config.dropout, batch_first=True)
         self.cross_attention = nn.MultiheadAttention(d, h, dropout=config.dropout, batch_first=True)
-        self.ff = nn.Sequential(nn.Linear(d, d * config.ff_mult), nn.GELU(), nn.Dropout(config.dropout),
-                                nn.Linear(d * config.ff_mult, d))
+        self.ff = nn.Sequential(
+            nn.Linear(d, d * config.ff_mult), nn.GELU(), nn.Dropout(config.dropout), nn.Linear(d * config.ff_mult, d)
+        )
         self.dropout = nn.Dropout(config.dropout)
         self.qk_norm = config.qk_norm
         if config.qk_norm:
@@ -106,6 +115,9 @@ class CrossLayer(nn.Module):
             self.cross_q_norm, self.cross_k_norm = nn.LayerNorm(d // h), nn.LayerNorm(d // h)
 
     def attend(self, attention, query, key, value, key_padding_mask, q_norm=None, k_norm=None):
+        """Multi-head attention of ``query`` over ``key``/``value`` (batch first) with ``key_padding_mask`` True at
+        padding. With ``qk_norm`` the module's projections are applied by hand so ``q_norm``/``k_norm`` can normalise
+        each head's queries and keys before scaled dot-product attention."""
         if not self.qk_norm:
             return attention(query, key, value, key_padding_mask=key_padding_mask, need_weights=False)[0]
         heads, dim = attention.num_heads, attention.embed_dim
@@ -113,17 +125,38 @@ class CrossLayer(nn.Module):
         split = lambda x: x.view(x.shape[0], x.shape[1], heads, dim // heads).transpose(1, 2)  # [B, H, T, dh]
         q, k, v = q_norm(split(q)), k_norm(split(k)), split(v)
         mask = None if key_padding_mask is None else ~key_padding_mask[:, None, None, :]
-        out = F.scaled_dot_product_attention(q, k, v, attn_mask=mask,
-                                             dropout_p=attention.dropout if self.training else 0.0)
+        out = F.scaled_dot_product_attention(
+            q, k, v, attn_mask=mask, dropout_p=attention.dropout if self.training else 0.0
+        )
         return attention.out_proj(out.transpose(1, 2).reshape(query.shape[0], query.shape[1], dim))
 
     def forward(self, frames, frame_padding, text, text_padding):
+        """Update ``frames`` [B, T, dim] (``frame_padding`` [B, T] True = pad) from ``text`` [B, N, dim]
+        (``text_padding`` [B, N]); returns [B, T, dim]."""
         x = self.self_norm(frames)
-        frames = frames + self.dropout(self.attend(self.self_attention, x, x, x, frame_padding,
-                                                   getattr(self, "self_q_norm", None), getattr(self, "self_k_norm", None)))
+        frames = frames + self.dropout(
+            self.attend(
+                self.self_attention,
+                x,
+                x,
+                x,
+                frame_padding,
+                getattr(self, "self_q_norm", None),
+                getattr(self, "self_k_norm", None),
+            )
+        )
         x = self.cross_norm(frames)
-        frames = frames + self.dropout(self.attend(self.cross_attention, x, text, text, text_padding,
-                                                   getattr(self, "cross_q_norm", None), getattr(self, "cross_k_norm", None)))
+        frames = frames + self.dropout(
+            self.attend(
+                self.cross_attention,
+                x,
+                text,
+                text,
+                text_padding,
+                getattr(self, "cross_q_norm", None),
+                getattr(self, "cross_k_norm", None),
+            )
+        )
         return frames + self.dropout(self.ff(self.ff_norm(frames)))
 
 
@@ -140,12 +173,22 @@ class TextAligner(nn.Module):
             self.line = nn.Embedding(config.max_lines, d)
             self.line_position = nn.Embedding(config.max_line_positions, d)
         self.text_encoder = nn.TransformerEncoder(
-            nn.TransformerEncoderLayer(d, config.heads, d * config.ff_mult, config.dropout, batch_first=True,
-                                       norm_first=True, activation="gelu"),
-            config.text_layers, enable_nested_tensor=False)
+            nn.TransformerEncoderLayer(
+                d,
+                config.heads,
+                d * config.ff_mult,
+                config.dropout,
+                batch_first=True,
+                norm_first=True,
+                activation="gelu",
+            ),
+            config.text_layers,
+            enable_nested_tensor=False,
+        )
         self.text_norm = nn.LayerNorm(d)
-        self.frame_in = nn.Sequential(nn.LayerNorm(config.frame_dim + config.letter_dim),
-                                      nn.Linear(config.frame_dim + config.letter_dim, d))
+        self.frame_in = nn.Sequential(
+            nn.LayerNorm(config.frame_dim + config.letter_dim), nn.Linear(config.frame_dim + config.letter_dim, d)
+        )
         self.cross = nn.ModuleList(CrossLayer(config) for _ in range(config.cross_layers))
         self.frame_norm = nn.LayerNorm(d)
         # Per voice: query/key projections for the token scores and a "none" / "singing" logit per frame.
@@ -163,12 +206,16 @@ class TextAligner(nn.Module):
         positions = torch.arange(letters.shape[1], device=letters.device).expand(letters.shape[:2])
         x = self.tokens(letters) + self.voice(voice) + sinusoid(positions, self.config.dim)
         if self.config.line_embeddings:
-            x = x + self.line(line.clamp(0, self.config.max_lines - 1)) \
+            x = (
+                x
+                + self.line(line.clamp(0, self.config.max_lines - 1))
                 + self.line_position(position.clamp(0, self.config.max_line_positions - 1))
+            )
         return self.text_norm(self.text_encoder(x, src_key_padding_mask=text_padding))
 
-    def forward_parts(self, hidden, frame_padding, letters, voice, text_padding, letter_log_probs=None,
-                      line=None, position=None):
+    def forward_parts(
+        self, hidden, frame_padding, letters, voice, text_padding, letter_log_probs=None, line=None, position=None
+    ):
         """Per voice: ``combined`` [B, T, 1 + N] log-probabilities over [none, every token] (what the
         decoders read), and with ``factorized`` also ``singing`` logits [B, T] and ``token`` log-probs
         [B, T, N] (normalised over that voice's tokens only)."""
@@ -189,7 +236,9 @@ class TextAligner(nn.Module):
             evidence = torch.log(torch.einsum("btc,bnc->btn", letter_log_probs.float().exp(), mix).clamp_min(1e-6))
         parts = []
         for v in (LEAD, BACKING):
-            scores = torch.einsum("btd,bnd->btn", self.query[v](frames), self.key[v](text)).float() / math.sqrt(self.config.dim)
+            scores = torch.einsum("btd,bnd->btn", self.query[v](frames), self.key[v](text)).float() / math.sqrt(
+                self.config.dim
+            )
             if evidence is not None:
                 scores = scores + self.letter_scale[v] * evidence
             usable = (~text_padding) & (voice == v)
@@ -206,11 +255,14 @@ class TextAligner(nn.Module):
                 parts.append({"combined": F.log_softmax(torch.cat((none, scores), -1), -1)})
         return parts
 
-    def forward(self, hidden, frame_padding, letters, voice, text_padding, letter_log_probs=None,
-                line=None, position=None):
+    def forward(
+        self, hidden, frame_padding, letters, voice, text_padding, letter_log_probs=None, line=None, position=None
+    ):
         """(lead, backing) log-probabilities [B, T, 1 + N] over [none, every token of the song]; a voice's
         column j + 1 is ~IMPOSSIBLE unless token j belongs to that voice (and is not padding)."""
-        parts = self.forward_parts(hidden, frame_padding, letters, voice, text_padding, letter_log_probs, line, position)
+        parts = self.forward_parts(
+            hidden, frame_padding, letters, voice, text_padding, letter_log_probs, line, position
+        )
         return parts[LEAD]["combined"], parts[BACKING]["combined"]
 
 
@@ -221,8 +273,15 @@ def forward_sum_loss(log_probs, sequences, lengths, frames):
     if rows.numel() == 0:
         return log_probs.new_zeros(())
     targets = torch.cat([sequences[r, : lengths[r]] for r in rows.tolist()])
-    return F.ctc_loss(log_probs[rows].transpose(0, 1), targets, frames[rows], lengths[rows],
-                      blank=0, reduction="mean", zero_infinity=True)
+    return F.ctc_loss(
+        log_probs[rows].transpose(0, 1),
+        targets,
+        frames[rows],
+        lengths[rows],
+        blank=0,
+        reduction="mean",
+        zero_infinity=True,
+    )
 
 
 def voice_loss(part, targets, sequences, lengths, frames, fs_weight, fs_mode="ctc", regions=None, region_loss=None):
@@ -247,13 +306,13 @@ def voice_loss(part, targets, sequences, lengths, frames, fs_weight, fs_mode="ct
             stop = min(stop, int(frames[batch]))
             if stop - first >= count > 0:
                 segments.append(part["token"][batch, first:stop])
-                columns.append(regions[batch, region, 3:3 + count] - 1)
+                columns.append(regions[batch, region, 3 : 3 + count] - 1)
                 covered += stop - first
         fs = region_loss(segments, columns) / max(covered, 1) if segments else combined.new_zeros(())
         if "singing" in part:
             sung = graded & (targets > 0)
             bce = F.binary_cross_entropy_with_logits(part["singing"][graded], sung[graded].float())
-            ce = (F.nll_loss(part["token"][sung], targets[sung] - 1) if sung.any() else combined.new_zeros(()))
+            ce = F.nll_loss(part["token"][sung], targets[sung] - 1) if sung.any() else combined.new_zeros(())
             stats.update(bce=bce.detach(), ce=ce.detach(), fs=fs.detach())
             return bce + ce + fs_weight * fs, stats
     if "singing" in part:
@@ -268,7 +327,7 @@ def voice_loss(part, targets, sequences, lengths, frames, fs_weight, fs_mode="ct
     if "singing" in part:
         sung = graded & (targets > 0)
         bce = F.binary_cross_entropy_with_logits(part["singing"][graded], sung[graded].float())
-        ce = (F.nll_loss(part["token"][sung], targets[sung] - 1) if sung.any() else combined.new_zeros(()))
+        ce = F.nll_loss(part["token"][sung], targets[sung] - 1) if sung.any() else combined.new_zeros(())
         loss = bce + ce + fs_weight * fs
         stats.update(bce=bce.detach(), ce=ce.detach())
     else:
@@ -297,8 +356,12 @@ def pack_song_tokens(tokens: list[dict], config: TextAlignerConfig) -> dict:
         previous = number
         line.append(number)
         position.append(count)
-    return {"letters": letters, "voice": voice, "line": torch.tensor(line, dtype=torch.long),
-            "position": torch.tensor(position, dtype=torch.long)}
+    return {
+        "letters": letters,
+        "voice": voice,
+        "line": torch.tensor(line, dtype=torch.long),
+        "position": torch.tensor(position, dtype=torch.long),
+    }
 
 
 def collate_text(songs: list[dict], config: TextAlignerConfig) -> dict:
@@ -322,8 +385,14 @@ def voice_columns(voice: torch.Tensor, v: int) -> torch.Tensor:
     return (voice == v).nonzero(as_tuple=True)[0]
 
 
-def decode_voice(log_probs: torch.Tensor, columns: list[int], *, line_ranges: list[tuple[int, int]] | None = None,
-                 minimum_frames: list[int] | None = None, in_line_gap_cost: float = 0.0):
+def decode_voice(
+    log_probs: torch.Tensor,
+    columns: list[int],
+    *,
+    line_ranges: list[tuple[int, int]] | None = None,
+    minimum_frames: list[int] | None = None,
+    in_line_gap_cost: float = 0.0,
+):
     """Token spans of one voice from its output [T, 1 + N] (one song): the existing monotonic Viterbi
     (``ctc_segmentation.align_with_minimum_durations``) with one "letter" per token, the token's own
     column as its emission and column 0 ("none") as the blank. ``columns`` are the voice's token columns
@@ -333,6 +402,11 @@ def decode_voice(log_probs: torch.Tensor, columns: list[int], *, line_ranges: li
 
     groups = [[int(column)] for column in columns]
     spans = align_with_minimum_durations(
-        log_probs.float(), groups, blank=0, minimum_frames=minimum_frames or [1] * len(groups),
-        line_ranges=line_ranges, in_line_gap_cost=in_line_gap_cost)
+        log_probs.float(),
+        groups,
+        blank=0,
+        minimum_frames=minimum_frames or [1] * len(groups),
+        line_ranges=line_ranges,
+        in_line_gap_cost=in_line_gap_cost,
+    )
     return [group[0] for group in spans]

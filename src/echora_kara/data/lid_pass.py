@@ -7,6 +7,7 @@ Reads ``<recording id>\\t<ttml path>`` lines on stdin and prints one JSON object
 
   python -m echora_kara.data.lid_pass --model lid.176.ftz < list.tsv
 """
+
 from __future__ import annotations
 
 import argparse
@@ -18,6 +19,7 @@ from echora_kara.text.document_language import document_digest, lyric_text
 
 
 def identify(model, ttml: str) -> dict:
+    """fastText top-3 language prediction for a TTML document's lyric text; no language for under 20 characters."""
     text = lyric_text(ttml)
     if len(text) < 20:
         return {"lid_language": None, "lid_confidence": 0.0, "lid_top3": []}
@@ -35,6 +37,7 @@ def read_ttml(path: Path) -> str:
 def identify_documents(model_path, todo):
     """Yield one record per readable (recording id, TTML path) of ``todo``."""
     import fasttext
+
     model = fasttext.load_model(str(model_path))
     for isrc, path in todo:
         try:
@@ -45,6 +48,7 @@ def identify_documents(model_path, todo):
 
 
 def main() -> None:
+    """Print one language-id JSON record per ``<id>\t<ttml path>`` line read from stdin."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model", required=True)
     args = parser.parse_args()

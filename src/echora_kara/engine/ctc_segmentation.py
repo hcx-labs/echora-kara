@@ -1,7 +1,8 @@
-"""Global CTC forced alignment with soft source-line onset priors.
+"""Global CTC forced alignment over an already-computed emission lattice.
 
-This module operates only on an already-computed emission lattice. It does not
-load an acoustic model, crop audio, or infer line timings independently.
+Plain Viterbi (with optional soft onset priors, which every current caller leaves empty), duration-floor and
+duration-model Viterbi variants, vocal-activity penalties, sub-frame start refinement and the exact frame clock of
+the stitched wav2vec2 / w2v-BERT lattice. It does not load an acoustic model or crop audio.
 """
 
 from __future__ import annotations
@@ -16,6 +17,9 @@ from torchaudio.functional import TokenSpan
 
 @dataclass(frozen=True)
 class SourcePrior:
+    """Soft onset prior: entering flattened target token ``target_index`` far from ``time_seconds`` costs a Huber
+    penalty scaled by ``weight``."""
+
     target_index: int
     time_seconds: float
     weight: float = 1.0
@@ -71,9 +75,7 @@ def align_with_source_priors(
     frame_count = int(emission.shape[0])
     negative_inf = torch.tensor(float("-inf"), device=emission.device)
 
-    prior_by_target = {
-        prior.target_index: (prior.time_seconds, prior.weight) for prior in source_priors
-    }
+    prior_by_target = {prior.target_index: (prior.time_seconds, prior.weight) for prior in source_priors}
     if any(target < 0 or target >= len(targets) for target in prior_by_target):
         invalid = next(target for target in prior_by_target if target < 0 or target >= len(targets))
         raise ValueError(f"source prior target {invalid} is outside the transcript")
@@ -103,9 +105,7 @@ def align_with_source_priors(
         scores[1] = initial
 
     # 0 means stay, 1 advance one state, 2 skip a blank. One byte per state.
-    backpointers = torch.zeros(
-        (frame_count, state_count), dtype=torch.uint8, device=emission.device
-    )
+    backpointers = torch.zeros((frame_count, state_count), dtype=torch.uint8, device=emission.device)
     state_indexes = torch.arange(state_count, device=emission.device)
     is_label = state_indexes.remainder(2).eq(1)
     skip_allowed = torch.zeros(state_count, dtype=torch.bool, device=emission.device)
@@ -374,33 +374,25 @@ def paced_minimum_frames(
         letters = sum(len(group) for group in token_groups[start:end])
         group_floor = max(1, min(group_cap, int(ratio * sung / len(spans))))
         letter_floor = max(1, min(letter_cap, int(ratio * sung / max(1, letters))))
-        minimums.extend(
-            token_minimum_frames(token_groups[start:end], letter_floor, group_floor, vowel_ids)
-        )
+        minimums.extend(token_minimum_frames(token_groups[start:end], letter_floor, group_floor, vowel_ids))
     return minimums
 
 
-def vocal_activity(
-    waveform: torch.Tensor, frame_count: int, hop: int = 320, window: int = 400
-) -> torch.Tensor:
+def vocal_activity(waveform: torch.Tensor, frame_count: int, hop: int = 320, window: int = 400) -> torch.Tensor:
     """Per-frame singing activity in [0, 1] from a 16 kHz vocal stem.
 
     Loudness (dB) over each frame's receptive field, scaled between the song's 10th and 90th
     percentile, so quiet passages read near 0 and full singing near 1.
     """
     waveform = waveform.flatten().float()
-    padded = torch.nn.functional.pad(
-        waveform, (0, max(0, frame_count * hop + window - waveform.numel()))
-    )
+    padded = torch.nn.functional.pad(waveform, (0, max(0, frame_count * hop + window - waveform.numel())))
     frames = padded.unfold(0, window, hop)[:frame_count]
     loudness = 10 * torch.log10(frames.square().mean(dim=1) + 1e-10)
     low, high = torch.quantile(loudness, 0.1), torch.quantile(loudness, 0.9)
     return ((loudness - low) / (high - low).clamp_min(1e-6)).clamp(0, 1)
 
 
-def with_vocal_activity(
-    emission: torch.Tensor, activity: torch.Tensor, blank: int, weight: float
-) -> torch.Tensor:
+def with_vocal_activity(emission: torch.Tensor, activity: torch.Tensor, blank: int, weight: float) -> torch.Tensor:
     """Letters cost ``weight`` x (1 - activity) extra per frame, so the path can't hold a word
     through silence or start a line in an instrumental; blanks (pauses) are unchanged."""
     penalty = weight * (1 - activity.to(emission.device, emission.dtype))
@@ -440,6 +432,7 @@ def w2v_bert_frame_count(samples: int) -> int:
 
 
 def frame_count(samples: int, backbone: str = "wav2vec2") -> int:
+    """Model frames produced for one chunk of ``samples`` input samples by the given backbone's front end."""
     if backbone == "wav2vec2-bert":
         return w2v_bert_frame_count(samples)
     if backbone == "wav2vec2":
@@ -448,6 +441,8 @@ def frame_count(samples: int, backbone: str = "wav2vec2") -> int:
 
 
 def receptive_field_centre_samples(backbone: str = "wav2vec2") -> float:
+    """Offset in samples from a chunk start to the receptive-field centre of its first frame (199.5 for wav2vec2,
+    279.5 for w2v-BERT); later frames follow every 320 samples."""
     if backbone == "wav2vec2-bert":
         return W2V_BERT_RECEPTIVE_FIELD_CENTRE_SAMPLES
     if backbone == "wav2vec2":
@@ -576,20 +571,65 @@ def onset_class(text: str) -> str:
 # --- Duration-model (semi-Markov) decoder ---------------------------------------------------------
 
 DURATION_VOWELS = re.compile(r"[aeiouy]+")
-DURATION_LATIN = {"en", "de", "fr", "es", "pt", "it", "id", "ms", "nl", "pl", "af", "sv", "no", "da", "fi",
-                  "tr", "vi", "ro", "cs", "hu", "hr", "sk", "sl", "ca", "tl", "sw", "xh", "zu", "et", "lv", "lt"}
+DURATION_LATIN = {
+    "en",
+    "de",
+    "fr",
+    "es",
+    "pt",
+    "it",
+    "id",
+    "ms",
+    "nl",
+    "pl",
+    "af",
+    "sv",
+    "no",
+    "da",
+    "fi",
+    "tr",
+    "vi",
+    "ro",
+    "cs",
+    "hu",
+    "hr",
+    "sk",
+    "sl",
+    "ca",
+    "tl",
+    "sw",
+    "xh",
+    "zu",
+    "et",
+    "lv",
+    "lt",
+}
 DURATION_SYLLABIC = {"zh", "yue", "ja", "ko"}
 
 
 def duration_features(text: str, ln_pace: float, final: bool, initial: bool, language: str | None) -> list[float]:
     """Per-token features of the duration model (its mu / ln_sigma are linear in these; keep the
     model fit on the same features)."""
-    group = ("en" if language == "en" else "latin" if language in DURATION_LATIN
-             else "syllabic" if language in DURATION_SYLLABIC else "other")
+    group = (
+        "en"
+        if language == "en"
+        else "latin"
+        if language in DURATION_LATIN
+        else "syllabic"
+        if language in DURATION_SYLLABIC
+        else "other"
+    )
     syllables = min(6, max(1, len(DURATION_VOWELS.findall(text))))
-    return [1.0, *[1.0 if syllables == k else 0.0 for k in range(2, 7)], math.log(max(1, len(text))), ln_pace,
-            float(final), float(initial), float(final) * ln_pace,
-            *[1.0 if group == g else 0.0 for g in ("latin", "syllabic", "other")]]
+    return [
+        1.0,
+        *[1.0 if syllables == k else 0.0 for k in range(2, 7)],
+        math.log(max(1, len(text))),
+        ln_pace,
+        float(final),
+        float(initial),
+        float(final) * ln_pace,
+        *[1.0 if group == g else 0.0 for g in ("latin", "syllabic", "other")],
+    ]
 
 
 def _line_paces(plain_spans, line_ranges, frame_shift_seconds: float, pause_frames: int) -> list[float]:
@@ -651,8 +691,9 @@ def align_with_duration_model(
         final.add(end - 1)
         initial.add(start)
     paces = _line_paces(plain_spans, line_ranges, shift, round(0.4 / shift))
-    blank_cumulative = torch.cat((torch.zeros(1, device=device, dtype=torch.float64),
-                                  emission[:, blank].to(torch.float64).cumsum(0)))
+    blank_cumulative = torch.cat(
+        (torch.zeros(1, device=device, dtype=torch.float64), emission[:, blank].to(torch.float64).cumsum(0))
+    )
     band = round(band_seconds / shift)
     max_gap = max(1, round(max_gap_seconds / shift))
     gap_frames = torch.arange(1, max_gap + 1, dtype=torch.float64, device=device)
@@ -663,8 +704,12 @@ def align_with_duration_model(
         ln_mu = gap_model["ln_mu"][0] + gap_model["ln_mu"][1] * ln_pace
         ln_sigma = gap_model["ln_sigma"]
         seconds = gap_frames * shift
-        log_density = (-torch.log(seconds) - math.log(ln_sigma)
-                       - (torch.log(seconds) - ln_mu) ** 2 / (2 * ln_sigma ** 2) + math.log(shift))
+        log_density = (
+            -torch.log(seconds)
+            - math.log(ln_sigma)
+            - (torch.log(seconds) - ln_mu) ** 2 / (2 * ln_sigma**2)
+            + math.log(shift)
+        )
         positive = math.log(1 - p_zero) + log_density
         return gap_weight * math.log(p_zero), gap_weight * positive, float(gap_weight * positive[-1])
 
@@ -672,11 +717,16 @@ def align_with_duration_model(
     back_start, back_previous = [], []
     for index, letters in enumerate(token_groups):
         letter_count = len(letters)
-        x = torch.tensor(duration_features(token_texts[index], paces[line_of[index]], index in final,
-                                           index in initial, language), dtype=torch.float64)
+        x = torch.tensor(
+            duration_features(token_texts[index], paces[line_of[index]], index in final, index in initial, language),
+            dtype=torch.float64,
+        )
         mu, sigma = float(x @ mu_beta), float(torch.exp(x @ sigma_beta))
-        max_duration = max(letter_count, math.ceil(math.exp(mu + max_sigma * sigma) / shift),
-                           token_minimum_frames[index] if token_minimum_frames is not None else 0)
+        max_duration = max(
+            letter_count,
+            math.ceil(math.exp(mu + max_sigma * sigma) / shift),
+            token_minimum_frames[index] if token_minimum_frames is not None else 0,
+        )
         centre = plain_spans[index][0].start
         first, last = max(0, centre - band), min(frames - letter_count, centre + band)
         if last < first:
@@ -724,8 +774,9 @@ def align_with_duration_model(
                 inside = frame < frames
                 if not bool(inside.any()):
                     break
-                moved = torch.cat((torch.full((len(starts), 1), negative_inf, dtype=torch.float64, device=device),
-                                   state[:, :-1]), 1)
+                moved = torch.cat(
+                    (torch.full((len(starts), 1), negative_inf, dtype=torch.float64, device=device), state[:, :-1]), 1
+                )
                 state = torch.maximum(state, moved) + token_emission[frame.clamp_max(frames - 1)]
                 state[~inside] = negative_inf
             if duration < letter_count or (token_minimum_frames is not None and duration < token_minimum_frames[index]):
@@ -735,8 +786,9 @@ def align_with_duration_model(
                 over = max(0.0, (math.log(seconds) - mu) / sigma - one_sided_sigma)
                 duration_cost = -weight * over * over / 2
             else:
-                duration_cost = weight * (-math.log(seconds) - math.log(sigma)
-                                          - (math.log(seconds) - mu) ** 2 / (2 * sigma ** 2))
+                duration_cost = weight * (
+                    -math.log(seconds) - math.log(sigma) - (math.log(seconds) - mu) ** 2 / (2 * sigma**2)
+                )
             value = start_score + state[:, -1] + duration_cost
             ends = starts + duration
             keep = ends <= frames

@@ -12,6 +12,7 @@ decodings are compared:
 
 usage: python -m echora_kara.evaluation.checkpoint_eval <run>/checkpoint-1000
 """
+
 import argparse
 import json
 import random
@@ -31,13 +32,16 @@ def outputs(model, audio, device):
     starts = [s for s in range(0, len(audio), chunk - overlap) if s == 0 or len(audio) - s > overlap]
     ctc_parts, odds_parts = [], []
     for index, start in enumerate(starts):
-        piece = audio[start:start + chunk]
+        piece = audio[start : start + chunk]
         piece = (piece - piece.mean()) / (piece.std() + 1e-7)
         with torch.inference_mode():
             result = model(torch.from_numpy(piece)[None].to(device))
             ctc = torch.log_softmax(result.logits[0].float(), dim=-1).cpu().numpy()
-            odds = (result.overlap_logits[0].float().cpu().numpy() if getattr(result, "overlap_logits", None) is not None
-                    else None)  # logit = log-odds
+            odds = (
+                result.overlap_logits[0].float().cpu().numpy()
+                if getattr(result, "overlap_logits", None) is not None
+                else None
+            )  # logit = log-odds
         frames = round(ctc.shape[0] * overlap / max(1, len(piece)))
         left = frames // 2 if index else 0
         right = frames - frames // 2 if index + 1 < len(starts) else 0
@@ -69,12 +73,19 @@ def interval_scores(odds, ids, starts):
 
 
 def candidates(odds, word, base):
+    """Up to proto.CANDIDATES best (start_frame, end_frame, score) intervals on the overlap head for ``word``, starts
+    within ±1.5 s of its single-path interval ``base``, which is always kept when it fits (never an empty list)."""
     total = odds.shape[0]
     starts = np.arange(max(0, base[0] - proto.SEARCH), min(total - 1, base[0] + proto.SEARCH) + 1)
     scores = interval_scores(odds, word["ids"], starts)
-    flat = np.argsort(scores, axis=None)[::-1][:proto.CANDIDATES]
-    found = {(int(starts[i // proto.MAX_LEN]), int(starts[i // proto.MAX_LEN] + i % proto.MAX_LEN + 1)): float(scores.flat[i])
-             for i in flat if np.isfinite(scores.flat[i])}
+    flat = np.argsort(scores, axis=None)[::-1][: proto.CANDIDATES]
+    found = {
+        (int(starts[i // proto.MAX_LEN]), int(starts[i // proto.MAX_LEN] + i % proto.MAX_LEN + 1)): float(
+            scores.flat[i]
+        )
+        for i in flat
+        if np.isfinite(scores.flat[i])
+    }
     b_start, b_end = base
     if starts[0] <= b_start <= starts[-1] and 0 < b_end - b_start <= proto.MAX_LEN:
         value = scores[b_start - starts[0], b_end - b_start - 1]
@@ -195,20 +206,26 @@ def paired(v6_rows, v7_rows):
     difference = v7_mean - v6_mean
     return {
         "songs": len(v6_rows),
-        "v7_better_mean": int((difference < 0).sum()), "v7_worse_mean": int((difference > 0).sum()),
+        "v7_better_mean": int((difference < 0).sum()),
+        "v7_worse_mean": int((difference > 0).sum()),
         "median_song_mean_change_ms": round(float(np.median(difference)), 1),
         "median_song_median_change_ms": round(float(np.median(v7_median - v6_median)), 1),
         "v7_better_median": int((v7_median < v6_median).sum()),
-        "long_miss_share_v6": round(float(v6_long.mean()), 4), "long_miss_share_v7": round(float(v7_long.mean()), 4),
-        "v7_fewer_long_misses": int((v7_long < v6_long).sum()), "v7_more_long_misses": int((v7_long > v6_long).sum()),
+        "long_miss_share_v6": round(float(v6_long.mean()), 4),
+        "long_miss_share_v7": round(float(v7_long.mean()), 4),
+        "v7_fewer_long_misses": int((v7_long < v6_long).sum()),
+        "v7_more_long_misses": int((v7_long > v6_long).sum()),
         "interjection_songs": len(v6_int),
         "v7_better_interjections": int(sum(b < a for a, b in zip(v6_int, v7_int))),
         "median_song_interjection_change_ms": round(float(np.median(np.array(v7_int) - np.array(v6_int))) * 1000, 1)
-        if v6_int else None,
+        if v6_int
+        else None,
     }
 
 
 def main():
+    """Evaluate a checkpoint's single path, overlap decoder and gated decoders against the cached baseline on the test
+    songs (optionally on vocal stems), print a summary and write --out/<checkpoint name>.json. Needs CUDA."""
     parser = argparse.ArgumentParser()
     parser.add_argument("checkpoint")
     parser.add_argument("--data", default="test.jsonl")
@@ -216,27 +233,39 @@ def main():
     parser.add_argument("--v6-cache", default="overlap_proto/emissions")
     parser.add_argument("--costs", default="0.5,1,2,4,8")
     parser.add_argument("--out", default="checkpoint_eval")
-    parser.add_argument("--stems", default=None,
-                        help="Directory of separated vocals (<id>.npy): evaluate on what production aligns")
+    parser.add_argument(
+        "--stems", default=None, help="Directory of separated vocals (<id>.npy): evaluate on what production aligns"
+    )
     args = parser.parse_args()
     songs = [json.loads(line) for line in open(args.data)]
     songs = [s for s in songs if s.get("source_timing_granularity") in ("word", "syllable")]
     random.Random(7).shuffle(songs)
-    songs = songs[:args.songs] if args.songs else songs
+    songs = songs[: args.songs] if args.songs else songs
     device = "cuda"
     model = ForcedAligner.from_pretrained(args.checkpoint).to(device).eval()
     has_overlap = model.overlap_head is not None  # control runs have none: single path only
     costs = [float(c) for c in args.costs.split(",")]
-    rows = {"v6 single path": [], "v7 single path": [], **{f"v7 overlap decoder, cost {c:g}": [] for c in costs},
-            **{f"v7 gated decoder, cost {c:g}, heard > {t:g}": [] for c, t in GATES},
-            **{f"v7 distinct-letter gate, cost {c:g}, heard > {t:g}": [] for c, t in DISTINCT_GATES}}
+    rows = {
+        "v6 single path": [],
+        "v7 single path": [],
+        **{f"v7 overlap decoder, cost {c:g}": [] for c in costs},
+        **{f"v7 gated decoder, cost {c:g}, heard > {t:g}": [] for c, t in GATES},
+        **{f"v7 distinct-letter gate, cost {c:g}, heard > {t:g}": [] for c, t in DISTINCT_GATES},
+    }
     started = time.time()
     v6_model = None
     for number, song in enumerate(songs, 1):
         words = [
-            {"start": float(t["start"]), "end": float(t["end"]), "ids": [int(i) for i in t["ids"]],
-             "text": t.get("text", ""), "line": t["line"], "background": t.get("vocal_role") == "background"}
-            for t in song["alignment_tokens"] if t.get("ids") and not t.get("ignore")
+            {
+                "start": float(t["start"]),
+                "end": float(t["end"]),
+                "ids": [int(i) for i in t["ids"]],
+                "text": t.get("text", ""),
+                "line": t["line"],
+                "background": t.get("vocal_role") == "background",
+            }
+            for t in song["alignment_tokens"]
+            if t.get("ids") and not t.get("ignore")
         ]
         if args.stems:
             stem = Path(args.stems) / f"{song['id']}.npy"
@@ -251,13 +280,16 @@ def main():
         if not cached.exists():
             if v6_model is None:
                 from transformers import Wav2Vec2ForCTC
+
                 v6_model = Wav2Vec2ForCTC.from_pretrained(proto.REPO, revision=proto.REVISION).to(device).eval()
             cached.parent.mkdir(parents=True, exist_ok=True)
             np.save(cached, proto.emissions(v6_model, audio, device).astype(np.float16))
         try:
             v7_base = proto.baseline(ctc, words, device)
             if cached.exists():
-                rows["v6 single path"].append(proto.evaluate(words, proto.baseline(np.load(cached).astype(np.float32), words, device)))
+                rows["v6 single path"].append(
+                    proto.evaluate(words, proto.baseline(np.load(cached).astype(np.float32), words, device))
+                )
         except Exception as error:
             print(f"skip {song['id']}: {error}")
             continue
@@ -270,11 +302,13 @@ def main():
         prefix = presence(odds, words)
         for c, t in GATES:
             rows[f"v7 gated decoder, cost {c:g}, heard > {t:g}"].append(
-                proto.evaluate(words, gated_decode(words, cands, prefix, c, t)))
+                proto.evaluate(words, gated_decode(words, cands, prefix, c, t))
+            )
         pairs = distinct_presence(odds, words)
         for c, t in DISTINCT_GATES:
             rows[f"v7 distinct-letter gate, cost {c:g}, heard > {t:g}"].append(
-                proto.evaluate(words, distinct_decode(words, cands, pairs, c, t)))
+                proto.evaluate(words, distinct_decode(words, cands, pairs, c, t))
+            )
         if number % 10 == 0:
             print(f"{number}/{len(songs)} songs, {time.time() - started:.0f}s", flush=True)
     report = {name: proto.summarize(r) for name, r in rows.items() if r}
@@ -288,9 +322,11 @@ def main():
     for name, value in report.items():
         if isinstance(value, dict) and "errors" in value:
             e, o, i = value["errors"], value["overlap_errors"], value["interjection_errors"]
-            print(f"{name:40} start {e['median_ms']}/{e['mean_ms']} ms >500ms {e['over_500ms']:5d} | overlap words "
-                  f"{o['median_ms']} ms | interjections {i['median_ms']}/{i['mean_ms']} ms | recovered "
-                  f"{value['overlap_recall']:.0%} invented {value['invented_overlap_rate']:.1%}")
+            print(
+                f"{name:40} start {e['median_ms']}/{e['mean_ms']} ms >500ms {e['over_500ms']:5d} | overlap words "
+                f"{o['median_ms']} ms | interjections {i['median_ms']}/{i['mean_ms']} ms | recovered "
+                f"{value['overlap_recall']:.0%} invented {value['invented_overlap_rate']:.1%}"
+            )
 
 
 if __name__ == "__main__":

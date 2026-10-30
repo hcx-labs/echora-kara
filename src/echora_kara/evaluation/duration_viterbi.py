@@ -13,6 +13,7 @@ word is held while the rest are crammed.
 
 usage: python -m echora_kara.evaluation.duration_viterbi --emissions stem_emissions --k 1 2 3 4
 """
+
 import argparse
 import json
 import random
@@ -197,8 +198,8 @@ def vocal_activity(stem, frames):
     (400 samples centred at 320 k + 200), in dB, scaled between the song's 10th and 90th percentile."""
     out = np.zeros(frames, dtype=np.float32)
     for k in range(frames):
-        piece = stem[k * 320:k * 320 + 400]
-        out[k] = 10 * np.log10(np.mean(piece ** 2) + 1e-10) if piece.size else -100
+        piece = stem[k * 320 : k * 320 + 400]
+        out[k] = 10 * np.log10(np.mean(piece**2) + 1e-10) if piece.size else -100
     low, high = np.percentile(out, 10), np.percentile(out, 90)
     return np.clip((out - low) / max(1e-6, high - low), 0, 1)
 
@@ -214,23 +215,30 @@ def with_activity(emission, activity, strength):
 
 
 def word_spans(words, letter_spans):
+    """Collapse flat per-letter (start, end) frame spans into one (first letter start, last letter end) per word."""
     out, cursor = [], 0
     for w in words:
-        own = letter_spans[cursor:cursor + len(w["ids"])]
+        own = letter_spans[cursor : cursor + len(w["ids"])]
         cursor += len(w["ids"])
         out.append((own[0][0], own[-1][1]))
     return out
 
 
 def crammed_and_held(words, placed):
+    """Count (words shorter than 60 ms, words, held-first runs, interjection runs) for one song's placed frame
+    intervals. A run is 3+ consecutive interjections in a line; it is held-first when its first word lasts over 0.6 s
+    and over 3x the median of the rest, which stays under 150 ms."""
     durations = [(e - s) * proto.FRAME for s, e in placed]
     crammed = sum(d < 0.06 for d in durations)
     held = runs = 0
     i = 0
     while i < len(words):
         j = i
-        while (j < len(words) and words[j]["line"] == words[i]["line"]
-               and INTERJECTION.match(re.sub(r"[^a-z]", "", words[j]["text"].lower()) or "-")):
+        while (
+            j < len(words)
+            and words[j]["line"] == words[i]["line"]
+            and INTERJECTION.match(re.sub(r"[^a-z]", "", words[j]["text"].lower()) or "-")
+        ):
             j += 1
         if j - i >= 3:
             runs += 1
@@ -242,19 +250,27 @@ def crammed_and_held(words, placed):
 
 
 def main():
+    """Compare the plain CTC path with minimum-duration Viterbi variants (fixed, per-word, paced floors and the
+    vocal-activity penalty) on cached test-song emissions; prints a summary and writes the --out JSON report."""
     parser = argparse.ArgumentParser()
     parser.add_argument("--data", default="test.jsonl")
     parser.add_argument("--emissions", default="stem_emissions")
     parser.add_argument("--k", type=int, nargs="+", default=[1, 2, 3, 4])
     parser.add_argument("--word-ms", type=int, nargs="*", default=[], help="per-word floors to compare")
-    parser.add_argument("--hybrid-ms", type=int, nargs="*", default=[],
-                        help="per-word floors on top of 40 ms per letter")
+    parser.add_argument(
+        "--hybrid-ms", type=int, nargs="*", default=[], help="per-word floors on top of 40 ms per letter"
+    )
     parser.add_argument("--adaptive", type=float, nargs="*", default=[], help="adaptive floor ratios")
     parser.add_argument("--onset", type=float, nargs="*", default=[], help="onset-paced floor ratios")
     parser.add_argument("--sung", type=float, nargs="*", default=[], help="sung-pace floor ratios")
     parser.add_argument("--sung2", type=float, nargs="*", default=[], help="sung-pace floors, letters paced too")
-    parser.add_argument("--activity", type=float, nargs="*", default=[],
-                        help="vocal-activity penalty strengths, on top of the paced floor x0.9")
+    parser.add_argument(
+        "--activity",
+        type=float,
+        nargs="*",
+        default=[],
+        help="vocal-activity penalty strengths, on top of the paced floor x0.9",
+    )
     parser.add_argument("--stems", default="vocal_stems")
     parser.add_argument("--songs", type=int, default=80)
     parser.add_argument("--out", default="decoder_eval/duration.json")
@@ -262,16 +278,22 @@ def main():
     songs = [json.loads(line) for line in open(args.data)]
     songs = [s for s in songs if s.get("source_timing_granularity") in ("word", "syllable")]
     random.Random(7).shuffle(songs)
-    songs = songs[:args.songs]
+    songs = songs[: args.songs]
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    rows = {name: [] for name in ["torchaudio baseline", *[f"min {k * 20} ms/letter" for k in args.k],
-                                  *[f"min {m} ms/word" for m in args.word_ms],
-                                  *[f"40/letter + {m}/word" for m in args.hybrid_ms],
-                                  *[f"adaptive x{r:g}" for r in args.adaptive],
-                                  *[f"onset-paced x{r:g}" for r in args.onset],
-                                  *[f"sung-pace x{r:g}" for r in args.sung],
-                                  *[f"paced letters x{r:g}" for r in args.sung2],
-                                  *[f"paced + activity {a:g}" for a in args.activity]]}
+    rows = {
+        name: []
+        for name in [
+            "torchaudio baseline",
+            *[f"min {k * 20} ms/letter" for k in args.k],
+            *[f"min {m} ms/word" for m in args.word_ms],
+            *[f"40/letter + {m}/word" for m in args.hybrid_ms],
+            *[f"adaptive x{r:g}" for r in args.adaptive],
+            *[f"onset-paced x{r:g}" for r in args.onset],
+            *[f"sung-pace x{r:g}" for r in args.sung],
+            *[f"paced letters x{r:g}" for r in args.sung2],
+            *[f"paced + activity {a:g}" for a in args.activity],
+        ]
+    }
     extra = {name: [0, 0, 0, 0] for name in rows}
     started = time.time()
     for number, song in enumerate(songs, 1):
@@ -292,47 +314,56 @@ def main():
         for m in args.word_ms:
             try:
                 placed[f"min {m} ms/word"] = word_spans(
-                    words, min_duration_viterbi(emission, ids, word_floor(words, round(m / 20)), device))
+                    words, min_duration_viterbi(emission, ids, word_floor(words, round(m / 20)), device)
+                )
             except ValueError:
                 placed[f"min {m} ms/word"] = base
         for m in args.hybrid_ms:
             try:
                 placed[f"40/letter + {m}/word"] = word_spans(
-                    words, min_duration_viterbi(emission, ids, word_floor(words, round(m / 20), 2), device))
+                    words, min_duration_viterbi(emission, ids, word_floor(words, round(m / 20), 2), device)
+                )
             except ValueError:
                 placed[f"40/letter + {m}/word"] = base
         for r in args.adaptive:
             try:
                 placed[f"adaptive x{r:g}"] = word_spans(
-                    words, min_duration_viterbi(emission, ids, adaptive_floor(words, base, r), device))
+                    words, min_duration_viterbi(emission, ids, adaptive_floor(words, base, r), device)
+                )
             except ValueError:
                 placed[f"adaptive x{r:g}"] = base
         for r in args.onset:
             try:
                 placed[f"onset-paced x{r:g}"] = word_spans(
-                    words, min_duration_viterbi(emission, ids, onset_floor(words, base, r), device))
+                    words, min_duration_viterbi(emission, ids, onset_floor(words, base, r), device)
+                )
             except ValueError:
                 placed[f"onset-paced x{r:g}"] = base
         for r in args.sung:
             try:
                 placed[f"sung-pace x{r:g}"] = word_spans(
-                    words, min_duration_viterbi(emission, ids, sung_floor(words, base, r), device))
+                    words, min_duration_viterbi(emission, ids, sung_floor(words, base, r), device)
+                )
             except ValueError:
                 placed[f"sung-pace x{r:g}"] = base
         for r in args.sung2:
             try:
                 placed[f"paced letters x{r:g}"] = word_spans(
-                    words, min_duration_viterbi(emission, ids, sung_floor2(words, base, r), device))
+                    words, min_duration_viterbi(emission, ids, sung_floor2(words, base, r), device)
+                )
             except ValueError:
                 placed[f"paced letters x{r:g}"] = base
         if args.activity:
-            activity = vocal_activity(np.load(Path(args.stems) / f"{song['id']}.npy").astype(np.float32), emission.shape[0])
+            activity = vocal_activity(
+                np.load(Path(args.stems) / f"{song['id']}.npy").astype(np.float32), emission.shape[0]
+            )
         for a in args.activity:
             adjusted = with_activity(emission, activity, a)
             try:
                 plain = proto.baseline(adjusted, words, device)
                 placed[f"paced + activity {a:g}"] = word_spans(
-                    words, min_duration_viterbi(adjusted, ids, sung_floor2(words, plain, 0.9), device))
+                    words, min_duration_viterbi(adjusted, ids, sung_floor2(words, plain, 0.9), device)
+                )
             except Exception:
                 placed[f"paced + activity {a:g}"] = base
         for name, spans in placed.items():
@@ -348,9 +379,11 @@ def main():
         summary.update(crammed_under_60ms=c, words=n, held_first_runs=h, interjection_runs=runs)
         report[name] = summary
         e, i = summary["errors"], summary["interjection_errors"]
-        print(f"{name:22} start {e['median_ms']}/{e['mean_ms']} ms >500 {e['over_500ms']:5d} | interjections "
-              f"{i['median_ms']}/{i['mean_ms']} ms | crammed <60 ms {c}/{n} ({c / max(1, n):.1%}) | "
-              f"held-first runs {h}/{runs}")
+        print(
+            f"{name:22} start {e['median_ms']}/{e['mean_ms']} ms >500 {e['over_500ms']:5d} | interjections "
+            f"{i['median_ms']}/{i['mean_ms']} ms | crammed <60 ms {c}/{n} ({c / max(1, n):.1%}) | "
+            f"held-first runs {h}/{runs}"
+        )
     Path(args.out).parent.mkdir(parents=True, exist_ok=True)
     Path(args.out).write_text(json.dumps(report, indent=2))
 

@@ -1,4 +1,5 @@
 """Read-only structural checks shared by preparation and publication audits."""
+
 import hashlib
 import math
 import unicodedata
@@ -17,39 +18,50 @@ LABEL_SCHEMA_VERSIONS = {6, 7}
 
 
 def artist_key(artist: str) -> str:
+    """Normalised artist key: NFKC, case-folded, stripped."""
     return unicodedata.normalize("NFKC", artist).casefold().strip()
 
 
 def split_for_artist(artist: str) -> str:
+    """Hash split of one artist: 90 % train, 5 % validation, 5 % test by the sha256 of its key."""
     bucket = int(hashlib.sha256(artist_key(artist).encode()).hexdigest()[:8], 16) % 100
     return "train" if bucket < 90 else "validation" if bucket < 95 else "test"
 
 
 def identity_problem(row, split):
     """Why this row's recording identity is unacceptable for its split, or None."""
-    audio, lyric = row.get('audio_match_status'), row.get('lyric_match_status')
-    if audio == 'exact_isrc' and (row.get('requested_isrc') != row.get('id') or row.get('matched_isrc') != row.get('id')):
-        return 'audio_provenance_mismatch'
-    if audio == 'isrc_mismatch':
-        return 'known_wrong_recording'
+    audio, lyric = row.get("audio_match_status"), row.get("lyric_match_status")
+    if audio == "exact_isrc" and (
+        row.get("requested_isrc") != row.get("id") or row.get("matched_isrc") != row.get("id")
+    ):
+        return "audio_provenance_mismatch"
+    if audio == "isrc_mismatch":
+        return "known_wrong_recording"
     if split in VERIFIED_SPLITS:
-        if lyric != 'exact_isrc':
-            return 'unverified_lyric_identity'
-        if audio != 'exact_isrc':
-            return 'unverified_audio_identity'
+        if lyric != "exact_isrc":
+            return "unverified_lyric_identity"
+        if audio != "exact_isrc":
+            return "unverified_audio_identity"
     elif audio not in TRAIN_AUDIO_STATUSES or lyric not in TRAIN_LYRIC_STATUSES:
-        return 'unknown_identity_status'
+        return "unknown_identity_status"
     return None
 
 
 def check_row(row, split, assignments, root=None, prepared=False):
+    """Validate one manifest row against its split and return its number of supervised units.
+
+    Raises ValueError on a split or identity problem, a missing content hash, an id/audio/hash reused or an artist
+    seen in another split (``assignments``, updated in place), an unprobed or invalid duration, an unsafe audio path
+    under ``root``, or a unit that breaks the label policy (outside the audio, non-a-z text, merged or violated source
+    fragment). ``prepared`` also checks the schema version, vocabulary ids and that ``alignment_tokens`` and
+    ``line_transcripts`` match ``timings``."""
     if row.get("split") != split:
         raise ValueError(f"{row.get('id')}: split field does not match manifest")
     problem = identity_problem(row, split)
     if problem:
         raise ValueError(f"{row.get('id')}: {problem}")
-    digest = row.get('audio_sha256', '')
-    if len(digest) != 64 or any(c not in '0123456789abcdef' for c in digest):
+    digest = row.get("audio_sha256", "")
+    if len(digest) != 64 or any(c not in "0123456789abcdef" for c in digest):
         raise ValueError(f"{row.get('id')}: audio content hash missing")
     for field in ("id", "audio", "artist_key", "audio_sha256"):
         value = row.get(field)
@@ -68,15 +80,15 @@ def check_row(row, split, assignments, root=None, prepared=False):
         path = (Path(root) / row["audio"]).resolve()
         if not path.is_relative_to(Path(root).resolve()) or not path.is_file():
             raise ValueError(f"{row['id']}: missing or unsafe audio path")
-    source_units = [u for line in row['timings'] for u in line]
+    source_units = [u for line in row["timings"] for u in line]
     units = row["alignment_tokens"] if prepared else source_units
     if prepared:
-        if row.get('label_schema_version') not in LABEL_SCHEMA_VERSIONS or row.get('pad_token_id') != 29:
+        if row.get("label_schema_version") not in LABEL_SCHEMA_VERSIONS or row.get("pad_token_id") != 29:
             raise ValueError(f"{row['id']}: obsolete prepared-label schema")
-        signature = lambda u: (u['start'], u['end'], u['text'], bool(u.get('ignore')))
+        signature = lambda u: (u["start"], u["end"], u["text"], bool(u.get("ignore")))
         if list(map(signature, units)) != list(map(signature, source_units)):
             raise ValueError(f"{row['id']}: prepared labels differ from curated timings")
-        if row.get('line_transcripts') != [''.join(u['text'] for u in line) for line in row['timings']]:
+        if row.get("line_transcripts") != ["".join(u["text"] for u in line) for line in row["timings"]]:
             raise ValueError(f"{row['id']}: transcript differs from curated timings")
     usable = 0
     for unit in units:
@@ -90,7 +102,7 @@ def check_row(row, split, assignments, root=None, prepared=False):
                 raise ValueError(f"{row['id']}: mask contains supervised labels")
         else:
             text = unit.get("text", "")
-            if not text or any(not 'a' <= c <= 'z' for c in text):
+            if not text or any(not "a" <= c <= "z" for c in text):
                 raise ValueError(f"{row['id']}: unsafe pronunciation")
             if unit.get("timing_method") != "weak_characters_within_source_fragment":
                 raise ValueError(f"{row['id']}: obsolete timing policy")
@@ -99,7 +111,7 @@ def check_row(row, split, assignments, root=None, prepared=False):
             span = unit["source_spans"][0]
             if unit["start"] < span["start"] - 1e-8 or unit["end"] > span["end"] + 1e-8:
                 raise ValueError(f"{row['id']}: source boundary not preserved")
-            if prepared and unit["ids"] != [ord(c) - ord('a') + 1 for c in text]:
+            if prepared and unit["ids"] != [ord(c) - ord("a") + 1 for c in text]:
                 raise ValueError(f"{row['id']}: vocabulary mismatch")
             usable += 1
     if not usable:
@@ -108,4 +120,5 @@ def check_row(row, split, assignments, root=None, prepared=False):
 
 
 def new_assignments():
+    """Empty per-field value→split maps for the duplicate and cross-split checks of ``check_row``."""
     return {field: {} for field in ("id", "audio", "artist_key", "audio_sha256")}

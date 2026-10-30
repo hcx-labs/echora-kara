@@ -59,6 +59,7 @@ alignment (intuition → in|tu|i|tion) instead of staying one item.
 
 Everything here is deterministic and offline; the espeak-ng version is recorded by the callers.
 """
+
 from __future__ import annotations
 
 import functools
@@ -91,18 +92,22 @@ class LabelRules:
 
     @property
     def v2(self) -> bool:
+        """True for every rule set except v1 (v3 sets include the v2 fixes)."""
         return self.name != "v1"
 
     @property
     def v3(self) -> bool:
+        """True for the v3 rule sets."""
         return self.name.startswith("v3")
 
     @property
     def pronunciation(self) -> frozenset:
+        """Languages labelled by pronunciation (en/de/fr); empty for v1 and the orthographic controls."""
         return PRONUNCIATION_LANGUAGES if self.name in ("v2", "v3", "v3-sung") else frozenset()
 
     @property
     def sung_vowels(self) -> bool:
+        """True for v3-sung (reduced English vowels take their spelled vowel letter)."""
         return self.name == "v3-sung"
 
     @property
@@ -121,6 +126,7 @@ class LabelRules:
 
 
 def resolve(rules) -> LabelRules:
+    """A ``LabelRules`` from a rule-set name, an existing instance, or None (v1)."""
     if rules is None:
         return LabelRules("v1")
     if isinstance(rules, LabelRules):
@@ -134,26 +140,106 @@ def resolve(rules) -> LabelRules:
 # IPA (espeak-ng output) → label letters. Longest match first; vowels carry kind "V".
 IPA_MAP = {
     # diphthongs and nasal vowels first (longest match)
-    "aɪə": "aia", "aʊə": "aua", "aɪ": "ai", "aʊ": "au", "eɪ": "ei", "oʊ": "o", "əʊ": "o", "ɔɪ": "oi",
-    "ɔʏ": "oi", "ɔø": "oi", "ɛə": "e", "ɪə": "ia", "ʊə": "ua", "eə": "e", "ɑ̃": "an", "ɔ̃": "on",
-    "ɛ̃": "en", "œ̃": "un", "ɑ̃ː": "an",
+    "aɪə": "aia",
+    "aʊə": "aua",
+    "aɪ": "ai",
+    "aʊ": "au",
+    "eɪ": "ei",
+    "oʊ": "o",
+    "əʊ": "o",
+    "ɔɪ": "oi",
+    "ɔʏ": "oi",
+    "ɔø": "oi",
+    "ɛə": "e",
+    "ɪə": "ia",
+    "ʊə": "ua",
+    "eə": "e",
+    "ɑ̃": "an",
+    "ɔ̃": "on",
+    "ɛ̃": "en",
+    "œ̃": "un",
+    "ɑ̃ː": "an",
     # vowels
-    "a": "a", "ɑ": "a", "æ": "a", "ʌ": "a", "ɐ": "a", "ə": "a", "ɚ": "er", "ɝ": "er", "ɜ": "er",
-    "e": "e", "ɛ": "e", "ɪ": "i", "i": "i", "ɨ": "i", "ɔ": "o", "o": "o", "ɒ": "o", "ʊ": "u", "u": "u",
-    "ʉ": "u", "y": "yu", "ʏ": "yu", "ø": "oe", "œ": "oe",
+    "a": "a",
+    "ɑ": "a",
+    "æ": "a",
+    "ʌ": "a",
+    "ɐ": "a",
+    "ə": "a",
+    "ɚ": "er",
+    "ɝ": "er",
+    "ɜ": "er",
+    "e": "e",
+    "ɛ": "e",
+    "ɪ": "i",
+    "i": "i",
+    "ɨ": "i",
+    "ɔ": "o",
+    "o": "o",
+    "ɒ": "o",
+    "ʊ": "u",
+    "u": "u",
+    "ʉ": "u",
+    "y": "yu",
+    "ʏ": "yu",
+    "ø": "oe",
+    "œ": "oe",
     # consonants
-    "tʃ": "ch", "dʒ": "j", "ts": "ts", "dz": "dz", "pf": "pf",
-    "b": "b", "d": "d", "f": "f", "g": "g", "ɡ": "g", "h": "h", "k": "k", "l": "l", "ɫ": "l", "m": "m",
-    "n": "n", "p": "p", "s": "s", "t": "t", "v": "v", "w": "w", "z": "z", "ɹ": "r", "r": "r", "ʁ": "r",
-    "ɾ": "r", "ɻ": "r", "ʀ": "r", "θ": "th", "ð": "dh", "ʃ": "sh", "ʒ": "zh", "ŋ": "ng", "j": "y",
-    "ɲ": "ny", "ç": "kh", "x": "kh", "χ": "kh", "ʔ": "", "ʎ": "ly", "ɥ": "w", "ʍ": "w", "ɬ": "l",
-    "ʋ": "v", "β": "v", "ɣ": "g", "ɵ": "oe", "ɯ": "u", "ɘ": "e",
+    "tʃ": "ch",
+    "dʒ": "j",
+    "ts": "ts",
+    "dz": "dz",
+    "pf": "pf",
+    "b": "b",
+    "d": "d",
+    "f": "f",
+    "g": "g",
+    "ɡ": "g",
+    "h": "h",
+    "k": "k",
+    "l": "l",
+    "ɫ": "l",
+    "m": "m",
+    "n": "n",
+    "p": "p",
+    "s": "s",
+    "t": "t",
+    "v": "v",
+    "w": "w",
+    "z": "z",
+    "ɹ": "r",
+    "r": "r",
+    "ʁ": "r",
+    "ɾ": "r",
+    "ɻ": "r",
+    "ʀ": "r",
+    "θ": "th",
+    "ð": "dh",
+    "ʃ": "sh",
+    "ʒ": "zh",
+    "ŋ": "ng",
+    "j": "y",
+    "ɲ": "ny",
+    "ç": "kh",
+    "x": "kh",
+    "χ": "kh",
+    "ʔ": "",
+    "ʎ": "ly",
+    "ɥ": "w",
+    "ʍ": "w",
+    "ɬ": "l",
+    "ʋ": "v",
+    "β": "v",
+    "ɣ": "g",
+    "ɵ": "oe",
+    "ɯ": "u",
+    "ɘ": "e",
 }
 IPA_VOWELS = frozenset(k for k, v in IPA_MAP.items() if k and k[0] in "aɑæʌɐəɚɝɜeɛɪiɨɔoɒʊuʉyʏøœɵɯɘ")
 # Per-language overrides (the same sound sits on the same letter where the languages share it;
 # these are the symbols espeak uses differently per voice).
 IPA_OVERRIDES = {
-    "en": {"ɾ": "t", "ə": "a"},            # flapped t stays t (as CMUdict's T); schwa as in CMU AH0
+    "en": {"ɾ": "t", "ə": "a"},  # flapped t stays t (as CMUdict's T); schwa as in CMU AH0
     "de": {"ə": "e", "ɜ": "a", "ɐ": "a"},  # vocalic -er ending reads a (Mutter → muta)
     "fr": {"ə": "e"},
 }
@@ -162,11 +248,45 @@ _IPA_KEYS = sorted({*IPA_MAP, "ᵻ"}, key=len, reverse=True)  # ᵻ is read only
 
 # CMUdict ARPAbet → the same letters (v2; the v1 map with L→r and TH→s is in lyrics_normalizer).
 ARPABET_MAP = {
-    "AA": "a", "AE": "a", "AH": "a", "AO": "o", "AW": "au", "AY": "ai", "B": "b", "CH": "ch", "D": "d",
-    "DH": "dh", "EH": "e", "ER": "er", "EY": "ei", "F": "f", "G": "g", "HH": "h", "IH": "i", "IY": "i",
-    "JH": "j", "K": "k", "L": "l", "M": "m", "N": "n", "NG": "ng", "OW": "o", "OY": "oi", "P": "p",
-    "R": "r", "S": "s", "SH": "sh", "T": "t", "TH": "th", "UH": "u", "UW": "u", "V": "v", "W": "w",
-    "Y": "y", "Z": "z", "ZH": "zh",
+    "AA": "a",
+    "AE": "a",
+    "AH": "a",
+    "AO": "o",
+    "AW": "au",
+    "AY": "ai",
+    "B": "b",
+    "CH": "ch",
+    "D": "d",
+    "DH": "dh",
+    "EH": "e",
+    "ER": "er",
+    "EY": "ei",
+    "F": "f",
+    "G": "g",
+    "HH": "h",
+    "IH": "i",
+    "IY": "i",
+    "JH": "j",
+    "K": "k",
+    "L": "l",
+    "M": "m",
+    "N": "n",
+    "NG": "ng",
+    "OW": "o",
+    "OY": "oi",
+    "P": "p",
+    "R": "r",
+    "S": "s",
+    "SH": "sh",
+    "T": "t",
+    "TH": "th",
+    "UH": "u",
+    "UW": "u",
+    "V": "v",
+    "W": "w",
+    "Y": "y",
+    "Z": "z",
+    "ZH": "zh",
 }
 ARPABET_VOWELS = frozenset({"AA", "AE", "AH", "AO", "AW", "AY", "EH", "ER", "EY", "IH", "IY", "OW", "OY", "UH", "UW"})
 
@@ -205,6 +325,7 @@ def ipa_tokens(ipa: str, language: str, reduced: bool = False) -> list[tuple[str
 
 
 def arpabet_tokens(phones: list[str]) -> list[tuple[str, bool]]:
+    """(label, is_vowel) per CMUdict phone, stress digits ignored; phones without a label are dropped."""
     tokens = []
     for phone in phones:
         base = phone.rstrip("012")
@@ -237,53 +358,189 @@ def syllabify(tokens: list[tuple[str, bool]]) -> list[str]:
 # Lexicons
 
 # Sung forms of vocables and ad-libs (the spelling puts a silent h on the vowel's decay). Matched on the lower-cased word with repeated letters collapsed to two.
-VOCABLES: list[tuple[re.Pattern, str]] = [(re.compile(pattern), label) for pattern, label in [
-    (r"^oo+h*$", "u"), (r"^o+h+$", "o"), (r"^a+h+$", "a"), (r"^aa+$", "a"), (r"^u+h+$", "a"), (r"^e+h+$", "e"),
-    (r"^(y+e+a+h*|y+e+h+|yea+)$", "yea"), (r"^wh?o+a+h*$", "wo"), (r"^who+$", "wu"), (r"^woo+h*$", "wu"),
-    (r"^hoo+$", "hu"), (r"^m+h*m*$", "m"), (r"^h+m+$", "hm"), (r"^mhm+$", "mhm"), (r"^he+y+$", "hei"),
-    (r"^ay+e*$", "ai"), (r"^s+h+$", "sh"), (r"^doo+$", "du"), (r"^ooo+$", "u"), (r"^oh+o+$", "oo"),
-    (r"^uh+-?huh+$", "aha"), (r"^ha+h$", "ha"), (r"^ya+h$", "ya"), (r"^yo+h*$", "yo"), (r"^wo+h*$", "wo"),
-    (r"^huh+$", "ha"), (r"^duh+$", "da"), (r"^nah+$", "na"), (r"^bah+$", "ba"), (r"^lah+$", "la"),
-    (r"^ohh+$", "o"), (r"^ooh+$", "u"),
-]]
+VOCABLES: list[tuple[re.Pattern, str]] = [
+    (re.compile(pattern), label)
+    for pattern, label in [
+        (r"^oo+h*$", "u"),
+        (r"^o+h+$", "o"),
+        (r"^a+h+$", "a"),
+        (r"^aa+$", "a"),
+        (r"^u+h+$", "a"),
+        (r"^e+h+$", "e"),
+        (r"^(y+e+a+h*|y+e+h+|yea+)$", "yea"),
+        (r"^wh?o+a+h*$", "wo"),
+        (r"^who+$", "wu"),
+        (r"^woo+h*$", "wu"),
+        (r"^hoo+$", "hu"),
+        (r"^m+h*m*$", "m"),
+        (r"^h+m+$", "hm"),
+        (r"^mhm+$", "mhm"),
+        (r"^he+y+$", "hei"),
+        (r"^ay+e*$", "ai"),
+        (r"^s+h+$", "sh"),
+        (r"^doo+$", "du"),
+        (r"^ooo+$", "u"),
+        (r"^oh+o+$", "oo"),
+        (r"^uh+-?huh+$", "aha"),
+        (r"^ha+h$", "ha"),
+        (r"^ya+h$", "ya"),
+        (r"^yo+h*$", "yo"),
+        (r"^wo+h*$", "wo"),
+        (r"^huh+$", "ha"),
+        (r"^duh+$", "da"),
+        (r"^nah+$", "na"),
+        (r"^bah+$", "ba"),
+        (r"^lah+$", "la"),
+        (r"^ohh+$", "o"),
+        (r"^ooh+$", "u"),
+    ]
+]
 
 LETTER_NAMES = {
-    "en": {"a": "ei", "b": "bi", "c": "si", "d": "di", "e": "i", "f": "ef", "g": "ji", "h": "eich", "i": "ai",
-           "j": "jei", "k": "kei", "l": "el", "m": "em", "n": "en", "o": "o", "p": "pi", "q": "kyu", "r": "ar",
-           "s": "es", "t": "ti", "u": "yu", "v": "vi", "w": "dabalyu", "x": "eks", "y": "wai", "z": "zi"},
-    "en-orthographic": {"a": "ay", "b": "bee", "c": "see", "d": "dee", "e": "ee", "f": "ef", "g": "jee", "h": "aych",
-                        "i": "eye", "j": "jay", "k": "kay", "l": "el", "m": "em", "n": "en", "o": "o", "p": "pee",
-                        "q": "kyu", "r": "ar", "s": "es", "t": "tee", "u": "yu", "v": "vee", "w": "doubleyu",
-                        "x": "ex", "y": "wy", "z": "zee"},
-    "de": {"a": "a", "b": "be", "c": "tse", "d": "de", "e": "e", "f": "ef", "g": "ge", "h": "ha", "i": "i", "j": "yot",
-           "k": "ka", "l": "el", "m": "em", "n": "en", "o": "o", "p": "pe", "q": "ku", "r": "er", "s": "es", "t": "te",
-           "u": "u", "v": "fau", "w": "ve", "x": "iks", "y": "ipsilon", "z": "tset"},
-    "fr": {"a": "a", "b": "be", "c": "se", "d": "de", "e": "oe", "f": "ef", "g": "zhe", "h": "ash", "i": "i", "j": "zhi",
-           "k": "ka", "l": "el", "m": "em", "n": "en", "o": "o", "p": "pe", "q": "kyu", "r": "er", "s": "es", "t": "te",
-           "u": "yu", "v": "ve", "w": "dublve", "x": "iks", "y": "igrek", "z": "zed"},
+    "en": {
+        "a": "ei",
+        "b": "bi",
+        "c": "si",
+        "d": "di",
+        "e": "i",
+        "f": "ef",
+        "g": "ji",
+        "h": "eich",
+        "i": "ai",
+        "j": "jei",
+        "k": "kei",
+        "l": "el",
+        "m": "em",
+        "n": "en",
+        "o": "o",
+        "p": "pi",
+        "q": "kyu",
+        "r": "ar",
+        "s": "es",
+        "t": "ti",
+        "u": "yu",
+        "v": "vi",
+        "w": "dabalyu",
+        "x": "eks",
+        "y": "wai",
+        "z": "zi",
+    },
+    "en-orthographic": {
+        "a": "ay",
+        "b": "bee",
+        "c": "see",
+        "d": "dee",
+        "e": "ee",
+        "f": "ef",
+        "g": "jee",
+        "h": "aych",
+        "i": "eye",
+        "j": "jay",
+        "k": "kay",
+        "l": "el",
+        "m": "em",
+        "n": "en",
+        "o": "o",
+        "p": "pee",
+        "q": "kyu",
+        "r": "ar",
+        "s": "es",
+        "t": "tee",
+        "u": "yu",
+        "v": "vee",
+        "w": "doubleyu",
+        "x": "ex",
+        "y": "wy",
+        "z": "zee",
+    },
+    "de": {
+        "a": "a",
+        "b": "be",
+        "c": "tse",
+        "d": "de",
+        "e": "e",
+        "f": "ef",
+        "g": "ge",
+        "h": "ha",
+        "i": "i",
+        "j": "yot",
+        "k": "ka",
+        "l": "el",
+        "m": "em",
+        "n": "en",
+        "o": "o",
+        "p": "pe",
+        "q": "ku",
+        "r": "er",
+        "s": "es",
+        "t": "te",
+        "u": "u",
+        "v": "fau",
+        "w": "ve",
+        "x": "iks",
+        "y": "ipsilon",
+        "z": "tset",
+    },
+    "fr": {
+        "a": "a",
+        "b": "be",
+        "c": "se",
+        "d": "de",
+        "e": "oe",
+        "f": "ef",
+        "g": "zhe",
+        "h": "ash",
+        "i": "i",
+        "j": "zhi",
+        "k": "ka",
+        "l": "el",
+        "m": "em",
+        "n": "en",
+        "o": "o",
+        "p": "pe",
+        "q": "kyu",
+        "r": "er",
+        "s": "es",
+        "t": "te",
+        "u": "yu",
+        "v": "ve",
+        "w": "dublve",
+        "x": "iks",
+        "y": "igrek",
+        "z": "zed",
+    },
 }
-ACRONYMS = frozenset("""OK TV DJ CD DVD USA UK NYC MC VIP ID AM PM BFF DND SOS MVP CEO UFO ATM GPS LOL FBI CIA NBA NFL
+ACRONYMS = frozenset(
+    """OK TV DJ CD DVD USA UK NYC MC VIP ID AM PM BFF DND SOS MVP CEO UFO ATM GPS LOL FBI CIA NBA NFL
 BMW DNA EP LP OMG IDK TBH BRB RIP VHS ABC MTV BBC CNN XO AI UFC WWE NYPD LAPD DC AC PC TBD ETA PS IOU SUV RV TNT UV
 MDMA LSD THC CBD PTSD ADHD OCD IQ EDM RNB BBQ DIY FYI GTA KFC NSA OG AKA VIP CDC IRS DMV LGBT LGBTQ NRA UN EU US LA
-TLC AWOL MIA POV ESPN HBO USB SMS DM DMs IG FM AMA""".split())
+TLC AWOL MIA POV ESPN HBO USB SMS DM DMs IG FM AMA""".split()
+)
 SYMBOL_WORDS = {
-    "&": {"en": "and", "de": "und", "fr": "et"}, "%": {"en": "percent", "de": "prozent", "fr": "pour cent"},
-    "$": {"en": "dollars", "de": "dollar", "fr": "dollars"}, "+": {"en": "plus", "de": "plus", "fr": "plus"},
-    "@": {"en": "at", "de": "at", "fr": "arobase"}, "€": {"en": "euros", "de": "euro", "fr": "euros"},
+    "&": {"en": "and", "de": "und", "fr": "et"},
+    "%": {"en": "percent", "de": "prozent", "fr": "pour cent"},
+    "$": {"en": "dollars", "de": "dollar", "fr": "dollars"},
+    "+": {"en": "plus", "de": "plus", "fr": "plus"},
+    "@": {"en": "at", "de": "at", "fr": "arobase"},
+    "€": {"en": "euros", "de": "euro", "fr": "euros"},
     "£": {"en": "pounds", "de": "pfund", "fr": "livres"},
 }
 CURRENCY = frozenset("$€£")
 ORDINAL_SUFFIXES = {"en": {"st", "nd", "rd", "th"}, "fr": {"er", "re", "e", "ème", "eme"}, "de": set()}
 _APOSTROPHES = "'’ʼ"
+
+
 def _is_word(text: str) -> bool:
     return bool(text) and all(c.isalpha() or c in _APOSTROPHES for c in text)
 
 
 def collapse_repeats(word: str) -> str:
+    """Shorten every run of three or more identical characters to two (``ooooh`` -> ``ooh``)."""
     return re.sub(r"(.)\1{2,}", r"\1\1", word)
 
 
 def vocable_label(word: str) -> str | None:
+    """Sung label of a vocable or ad-lib (``VOCABLES``, e.g. ``yeah`` -> yea), or None when ``word`` is not one."""
     folded = collapse_repeats(word.lower().translate(str.maketrans("’ʼ", "''")))
     for pattern, label in VOCABLES:
         if pattern.match(folded):
@@ -292,6 +549,7 @@ def vocable_label(word: str) -> str | None:
 
 
 def is_acronym(word: str) -> bool:
+    """True for 2-4 ASCII capitals (apostrophes stripped) without a vowel, or one listed in ``ACRONYMS``."""
     letters = word.replace("’", "'").strip("'")
     if not (2 <= len(letters) <= 4 and letters.isalpha() and letters.isascii() and letters.isupper()):
         return False
@@ -314,17 +572,27 @@ def _espeak_backend(language: str):
         raise RuntimeError("label rules v2 pronunciation labels need the phonemizer package and espeak-ng") from error
     logging.getLogger("phonemizer").setLevel(logging.ERROR)
     import os
+
     found = espeak_version()
     if not found.startswith(ESPEAK_ACCEPTED) and os.environ.get("ECHORA_KARA_ESPEAK_ANY_VERSION") != "1":
-        raise RuntimeError(f"label rules v2 accept espeak-ng {' / '.join(ESPEAK_ACCEPTED)}, this is {found}: "
-                           "install that release (or set ECHORA_KARA_ESPEAK_ANY_VERSION=1 knowingly)")
-    return EspeakBackend(ESPEAK_VOICES[language], with_stress=False, language_switch="keep-flags",
-                         words_mismatch="ignore", logger=logging.getLogger("phonemizer"))
+        raise RuntimeError(
+            f"label rules v2 accept espeak-ng {' / '.join(ESPEAK_ACCEPTED)}, this is {found}: "
+            "install that release (or set ECHORA_KARA_ESPEAK_ANY_VERSION=1 knowingly)"
+        )
+    return EspeakBackend(
+        ESPEAK_VOICES[language],
+        with_stress=False,
+        language_switch="keep-flags",
+        words_mismatch="ignore",
+        logger=logging.getLogger("phonemizer"),
+    )
 
 
 def espeak_version() -> str:
+    """The installed espeak-ng version as reported by phonemizer (e.g. "1.52.0"), or "unavailable"."""
     try:
         from phonemizer.backend import EspeakBackend
+
         return ".".join(map(str, EspeakBackend.version()))
     except Exception:  # noqa: BLE001
         return "unavailable"
@@ -334,6 +602,7 @@ def espeak_version() -> str:
 def _cmudict():
     try:
         from nltk.corpus import cmudict
+
         return cmudict.dict()
     except LookupError as error:  # pragma: no cover
         raise RuntimeError("CMUdict is not available to nltk") from error
@@ -342,6 +611,7 @@ def _cmudict():
 @functools.lru_cache(maxsize=None)
 def _pyphen(language: str):
     import pyphen
+
     return pyphen.Pyphen(lang=PYPHEN_LANGUAGES[language])
 
 
@@ -359,9 +629,18 @@ def espeak_tokens(word: str, language: str) -> tuple[tuple[tuple[str, bool], ...
 
 # French elided clitics (sung without their vowel): espeak reads "qu'tu" or "j't'ai" as foreign
 # words, so they are peeled off and labelled by sound before the rest goes to espeak.
-FRENCH_CLITICS = {"qu": (("k", False),), "j": (("zh", False),), "t": (("t", False),), "c": (("s", False),),
-                  "d": (("d", False),), "l": (("l", False),), "m": (("m", False),), "n": (("n", False),),
-                  "s": (("s", False),), "p": (("p", False),)}
+FRENCH_CLITICS = {
+    "qu": (("k", False),),
+    "j": (("zh", False),),
+    "t": (("t", False),),
+    "c": (("s", False),),
+    "d": (("d", False),),
+    "l": (("l", False),),
+    "m": (("m", False),),
+    "n": (("n", False),),
+    "s": (("s", False),),
+    "p": (("p", False),),
+}
 _CLITIC = re.compile(r"^(qu|[jtcdlmnsp])'(?=\w)")
 
 
@@ -371,11 +650,13 @@ def word_pronunciation(word: str, language: str) -> tuple[tuple[tuple[str, bool]
     lowered = word.lower().translate(str.maketrans("’ʼ", "''"))
     vocable = vocable_label(word)
     if vocable:
-        return tuple((vocable, True),), "lexicon"
+        return tuple(
+            (vocable, True),
+        ), "lexicon"
     if language == "fr":
         match = _CLITIC.match(lowered)
         if match and len(lowered) > match.end():
-            rest, source = word_pronunciation(lowered[match.end():], language)
+            rest, source = word_pronunciation(lowered[match.end() :], language)
             return FRENCH_CLITICS[match.group(1)] + rest, source
     if language == "en":
         cmu = _cmudict()
@@ -406,6 +687,7 @@ def pronunciation_items(word: str, language: str, item_type: int = 1) -> tuple[l
 # ---------------------------------------------------------------------------------------------
 # Numbers, acronyms, symbols
 
+
 def _number_words(digits: str, language: str, ordinal: bool = False) -> str:
     """Words of one digit string in the hint's language (English when the language has none)."""
     language = language if language in PRONUNCIATION_LANGUAGES else "en"
@@ -428,8 +710,9 @@ def _number_words(digits: str, language: str, ordinal: bool = False) -> str:
     return " ".join(words)
 
 
-def words_to_items(orig: str, words: str, language: str, rules: LabelRules, item_type: int = 4,
-                   pronounce: bool | None = None) -> list[dict]:
+def words_to_items(
+    orig: str, words: str, language: str, rules: LabelRules, item_type: int = 4, pronounce: bool | None = None
+) -> list[dict]:
     """One item for ``orig`` whose label reads ``words`` (pronounced or spelled per the rules)."""
     parts = [p for p in re.split(r"[\s\-]+", words.replace("-", " ")) if p]
     if pronounce is None:
@@ -448,7 +731,12 @@ def _spell(word: str) -> str:
     return re.sub(r"[^a-z]", "", folded)
 
 
-def number_items(digits: str, language: str, rules: LabelRules, ordinal: bool = False, currency: str | None = None) -> list[dict]:
+def number_items(
+    digits: str, language: str, rules: LabelRules, ordinal: bool = False, currency: str | None = None
+) -> list[dict]:
+    """Items reading the number ``digits`` as words in the hint's language (English outside en/de/fr), optionally as
+    an ordinal or followed by the ``currency`` symbol's word, pronounced or spelled per the rules (non-digits
+    ignored)."""
     clean = re.sub(r"[^0-9]", "", digits)
     if not clean:
         return [{"orig": digits, "type": 0}]
@@ -461,6 +749,7 @@ def number_items(digits: str, language: str, rules: LabelRules, ordinal: bool = 
 
 
 def acronym_items(word: str, language: str, rules: LabelRules) -> list[dict]:
+    """One type 1 item labelling ``word`` with its letter names in the hint's language (English otherwise)."""
     pronounce = language in rules.pronunciation
     language = language if language in PRONUNCIATION_LANGUAGES else "en"
     names = LETTER_NAMES[language if pronounce or language != "en" else "en-orthographic"]
@@ -469,18 +758,28 @@ def acronym_items(word: str, language: str, rules: LabelRules) -> list[dict]:
 
 
 def symbol_items(char: str, language: str, rules: LabelRules) -> list[dict]:
+    """One item reading a ``SYMBOL_WORDS`` symbol (``&`` -> and) in the hint's language; unlabelled without a word."""
     pronounce = language in rules.pronunciation
     language = language if language in PRONUNCIATION_LANGUAGES else "en"
     words = SYMBOL_WORDS.get(char, {}).get(language)
-    return words_to_items(char, words, language, rules, item_type=0, pronounce=pronounce) if words else [{"orig": char, "type": 0}]
+    return (
+        words_to_items(char, words, language, rules, item_type=0, pronounce=pronounce)
+        if words
+        else [{"orig": char, "type": 0}]
+    )
 
 
 def merge_number_runs(runs: list[list[str]]) -> list[list[str]]:
     """``10,000`` arrives as number / other / number runs; join thousands groups into one number run."""
     merged: list[list[str]] = []
     for kind, text in runs:
-        if (kind == "number" and len(text) == 3 and len(merged) >= 2 and merged[-1] == ["other", ","]
-                and merged[-2][0] == "number"):
+        if (
+            kind == "number"
+            and len(text) == 3
+            and len(merged) >= 2
+            and merged[-1] == ["other", ","]
+            and merged[-2][0] == "number"
+        ):
             merged.pop()
             merged[-1][1] += "," + text
             continue
@@ -509,8 +808,13 @@ def latin_items(text: str, language: str, rules: LabelRules, spell, context: tup
         if rules.v3:
             return pronunciation_items_v3(text, language, spell, context, sung=rules.sung_vowels)[0]
         return pronunciation_items(text, language)[0]
-    if (rules.pronunciation and language in NON_LATIN_SCRIPT_LANGUAGES and text.isascii()
-            and os.environ.get("ECHORA_KARA_LATIN_AS_ENGLISH") == "1" and _english_known(text.lower())):
+    if (
+        rules.pronunciation
+        and language in NON_LATIN_SCRIPT_LANGUAGES
+        and text.isascii()
+        and os.environ.get("ECHORA_KARA_LATIN_AS_ENGLISH") == "1"
+        and _english_known(text.lower())
+    ):
         # Inference option (opt-in): English words in a Korean/Japanese/... song read by English
         # sound, as a v2 model learned English on English songs (spelled, "how's your day" becomes
         # hows/your/day and lands late). Off: v2 output is unchanged.
@@ -520,10 +824,41 @@ def latin_items(text: str, language: str, rules: LabelRules, spell, context: tup
 
 # Song languages whose own script is not Latin: a Latin word in their lyrics is a foreign (mostly
 # English) word, not a romanisation of the song's language.
-NON_LATIN_SCRIPT_LANGUAGES = frozenset({
-    "ko", "ja", "zh", "yue", "th", "ar", "fa", "ur", "he", "hi", "bn", "ta", "te", "mr", "gu", "kn",
-    "ml", "pa", "ru", "uk", "bg", "sr", "mk", "be", "kk", "el", "ka", "hy", "km", "lo", "my",
-})
+NON_LATIN_SCRIPT_LANGUAGES = frozenset(
+    {
+        "ko",
+        "ja",
+        "zh",
+        "yue",
+        "th",
+        "ar",
+        "fa",
+        "ur",
+        "he",
+        "hi",
+        "bn",
+        "ta",
+        "te",
+        "mr",
+        "gu",
+        "kn",
+        "ml",
+        "pa",
+        "ru",
+        "uk",
+        "bg",
+        "sr",
+        "mk",
+        "be",
+        "kk",
+        "el",
+        "ka",
+        "hy",
+        "km",
+        "lo",
+        "my",
+    }
+)
 
 
 # ---------------------------------------------------------------------------------------------
@@ -539,66 +874,285 @@ def _arpabet(phones: str) -> tuple[tuple[str, bool], ...]:
 # Sung forms of casual / eye-dialect spellings in English lyrics, as ARPAbet (so syllables split like
 # CMUdict words). Matched on the lower-cased word, curly apostrophes folded. Entries whose v2 label was
 # already right are listed too, so the lexicon is the one place these words are defined.
-SLANG_EN = {word: phones for words, phones in [
-    ("tryna trynna", "T R AY1 N AH0"), ("gonna", "G AA1 N AH0"), ("gon' gon", "G AA1 N"),
-    ("wanna", "W AA1 N AH0"), ("finna", "F IH1 N AH0"), ("gotta", "G AA1 T AH0"), ("lemme", "L EH1 M IY0"),
-    ("gimme", "G IH1 M IY0"), ("kinda", "K AY1 N D AH0"), ("sorta", "S AO1 R T AH0"), ("outta", "AW1 T AH0"),
-    ("imma i'ma i'mma ima", "AY1 M AH0"), ("y'all ya'll yall", "Y AO1 L"), ("ain't aint", "EY1 N T"),
-    ("'cause cuz 'cuz coz 'cos", "K AH1 Z"), ("tho tho'", "DH OW1"), ("ya yuh", "Y AH0"), ("lil lil'", "L IH1 L"),
-    ("'em", "AH0 M"), ("'bout bout", "B AW1 T"), ("boutta", "B AW1 T AH0"), ("'til til", "T IH1 L"),
-    ("'round", "R AW1 N D"), ("'fore", "F AO1 R"), ("shoulda", "SH UH1 D AH0"), ("coulda", "K UH1 D AH0"),
-    ("woulda", "W UH1 D AH0"), ("musta", "M AH1 S T AH0"), ("oughta", "AO1 T AH0"), ("hafta", "HH AE1 F T AH0"),
-    ("gotcha", "G AA1 CH AH0"), ("betcha", "B EH1 CH AH0"), ("whatcha watcha", "W AH1 CH AH0"),
-    ("gotchu", "G AA1 CH UW0"), ("lotta", "L AA1 T AH0"), ("dunno", "D AH0 N OW1"), ("c'mon cmon", "K AH0 M AA1 N"),
-    ("shawty", "SH AO1 T IY0"), ("gyal", "G Y AA1 L"), ("innit", "IH1 N IH0 T"), ("thang", "TH AE1 NG"),
-    ("ol'", "OW1 L"), ("'nough nuff", "N AH1 F"), ("wassup whassup", "W AH0 S AH1 P"), ("hunnid hunnit", "HH AH1 N IH0 D"),
-] for word in words.split()}
+SLANG_EN = {
+    word: phones
+    for words, phones in [
+        ("tryna trynna", "T R AY1 N AH0"),
+        ("gonna", "G AA1 N AH0"),
+        ("gon' gon", "G AA1 N"),
+        ("wanna", "W AA1 N AH0"),
+        ("finna", "F IH1 N AH0"),
+        ("gotta", "G AA1 T AH0"),
+        ("lemme", "L EH1 M IY0"),
+        ("gimme", "G IH1 M IY0"),
+        ("kinda", "K AY1 N D AH0"),
+        ("sorta", "S AO1 R T AH0"),
+        ("outta", "AW1 T AH0"),
+        ("imma i'ma i'mma ima", "AY1 M AH0"),
+        ("y'all ya'll yall", "Y AO1 L"),
+        ("ain't aint", "EY1 N T"),
+        ("'cause cuz 'cuz coz 'cos", "K AH1 Z"),
+        ("tho tho'", "DH OW1"),
+        ("ya yuh", "Y AH0"),
+        ("lil lil'", "L IH1 L"),
+        ("'em", "AH0 M"),
+        ("'bout bout", "B AW1 T"),
+        ("boutta", "B AW1 T AH0"),
+        ("'til til", "T IH1 L"),
+        ("'round", "R AW1 N D"),
+        ("'fore", "F AO1 R"),
+        ("shoulda", "SH UH1 D AH0"),
+        ("coulda", "K UH1 D AH0"),
+        ("woulda", "W UH1 D AH0"),
+        ("musta", "M AH1 S T AH0"),
+        ("oughta", "AO1 T AH0"),
+        ("hafta", "HH AE1 F T AH0"),
+        ("gotcha", "G AA1 CH AH0"),
+        ("betcha", "B EH1 CH AH0"),
+        ("whatcha watcha", "W AH1 CH AH0"),
+        ("gotchu", "G AA1 CH UW0"),
+        ("lotta", "L AA1 T AH0"),
+        ("dunno", "D AH0 N OW1"),
+        ("c'mon cmon", "K AH0 M AA1 N"),
+        ("shawty", "SH AO1 T IY0"),
+        ("gyal", "G Y AA1 L"),
+        ("innit", "IH1 N IH0 T"),
+        ("thang", "TH AE1 NG"),
+        ("ol'", "OW1 L"),
+        ("'nough nuff", "N AH1 F"),
+        ("wassup whassup", "W AH0 S AH1 P"),
+        ("hunnid hunnit", "HH AH1 N IH0 D"),
+    ]
+    for word in words.split()
+}
 
 # Homographs: CMUdict's first reading is not the one lyrics mostly sing. (default, [(side, words, reading)]):
 # the first rule whose neighbouring word (previous or next word of the line) is in ``words`` wins.
 # Each choice was counted on 2,000 English training songs.
-_SUBJECTS = {"he", "she", "it", "who", "that", "which", "this", "everybody", "nobody", "somebody", "someone",
-             "everyone", "love", "god", "legend", "spirit", "memory", "time"}
+_SUBJECTS = {
+    "he",
+    "she",
+    "it",
+    "who",
+    "that",
+    "which",
+    "this",
+    "everybody",
+    "nobody",
+    "somebody",
+    "someone",
+    "everyone",
+    "love",
+    "god",
+    "legend",
+    "spirit",
+    "memory",
+    "time",
+}
 HOMOGRAPHS_EN = {
-    "live": ("L IH1 V", [("next", {"show", "shows", "music", "band", "stream", "streaming", "performance", "concert",
-                                   "wire", "broadcast", "album", "audience", "footage", "version"}, "L AY1 V")]),
+    "live": (
+        "L IH1 V",
+        [
+            (
+                "next",
+                {
+                    "show",
+                    "shows",
+                    "music",
+                    "band",
+                    "stream",
+                    "streaming",
+                    "performance",
+                    "concert",
+                    "wire",
+                    "broadcast",
+                    "album",
+                    "audience",
+                    "footage",
+                    "version",
+                },
+                "L AY1 V",
+            )
+        ],
+    ),
     "lives": ("L AY1 V Z", [("prev", _SUBJECTS, "L IH1 V Z")]),
     "lived": ("L IH1 V D", []),
     "wind": ("W IH1 N D", [("next", {"up", "down"}, "W AY1 N D")]),
-    "tear": ("T EH1 R", [("prev", {"a", "single", "one", "every", "no", "another", "last", "first", "lonely", "little",
-                                   "lil", "lil'"}, "T IH1 R"),
-                         ("next", {"drop", "drops", "stained", "falls", "fell", "fall", "rolls", "rolled", "rolling", "runs",
-                                   "ran", "running", "streams", "streaming", "gas", "ducts"}, "T IH1 R")]),
-    "tears": ("T IH1 R Z", [("prev", _SUBJECTS, "T EH1 R Z"),
-                            ("next", {"me", "him", "her", "us", "them", "apart", "open", "at"}, "T EH1 R Z")]),
-    "lead": ("L IY1 D", [("prev", {"of", "with", "like", "full", "pencil", "heavy", "hot", "red", "some", "made",
-                                   "filled", "pumped"}, "L EH1 D"),
-                         ("next", {"pipe", "pipes", "paint", "poisoning", "balloon", "zeppelin", "belly", "bullet",
-                                   "bullets"}, "L EH1 D")]),
-    "close": ("K L OW1 S", [("next", {"my", "your", "his", "her", "our", "their", "the", "its", "it", "them", "these",
-                                      "those", "this", "that", "down", "off", "out", "shop", "ranks", "door", "doors",
-                                      "eyes"}, "K L OW1 Z")]),
-    "read": ("R IY1 D", [("prev", {"have", "has", "had", "i've", "you've", "we've", "they've", "she's", "he's", "been",
-                                   "was", "were", "already", "once"}, "R EH1 D")]),
-    "bow": ("B AW1", [("prev", {"my", "your", "her", "his", "pink", "red", "favorite", "favourite", "rain", "silver",
-                                "golden"}, "B OW1"),
-                      ("next", {"tie", "ties", "arrow", "arrows", "string", "legged"}, "B OW1")]),
+    "tear": (
+        "T EH1 R",
+        [
+            (
+                "prev",
+                {"a", "single", "one", "every", "no", "another", "last", "first", "lonely", "little", "lil", "lil'"},
+                "T IH1 R",
+            ),
+            (
+                "next",
+                {
+                    "drop",
+                    "drops",
+                    "stained",
+                    "falls",
+                    "fell",
+                    "fall",
+                    "rolls",
+                    "rolled",
+                    "rolling",
+                    "runs",
+                    "ran",
+                    "running",
+                    "streams",
+                    "streaming",
+                    "gas",
+                    "ducts",
+                },
+                "T IH1 R",
+            ),
+        ],
+    ),
+    "tears": (
+        "T IH1 R Z",
+        [
+            ("prev", _SUBJECTS, "T EH1 R Z"),
+            ("next", {"me", "him", "her", "us", "them", "apart", "open", "at"}, "T EH1 R Z"),
+        ],
+    ),
+    "lead": (
+        "L IY1 D",
+        [
+            (
+                "prev",
+                {"of", "with", "like", "full", "pencil", "heavy", "hot", "red", "some", "made", "filled", "pumped"},
+                "L EH1 D",
+            ),
+            (
+                "next",
+                {"pipe", "pipes", "paint", "poisoning", "balloon", "zeppelin", "belly", "bullet", "bullets"},
+                "L EH1 D",
+            ),
+        ],
+    ),
+    "close": (
+        "K L OW1 S",
+        [
+            (
+                "next",
+                {
+                    "my",
+                    "your",
+                    "his",
+                    "her",
+                    "our",
+                    "their",
+                    "the",
+                    "its",
+                    "it",
+                    "them",
+                    "these",
+                    "those",
+                    "this",
+                    "that",
+                    "down",
+                    "off",
+                    "out",
+                    "shop",
+                    "ranks",
+                    "door",
+                    "doors",
+                    "eyes",
+                },
+                "K L OW1 Z",
+            )
+        ],
+    ),
+    "read": (
+        "R IY1 D",
+        [
+            (
+                "prev",
+                {
+                    "have",
+                    "has",
+                    "had",
+                    "i've",
+                    "you've",
+                    "we've",
+                    "they've",
+                    "she's",
+                    "he's",
+                    "been",
+                    "was",
+                    "were",
+                    "already",
+                    "once",
+                },
+                "R EH1 D",
+            )
+        ],
+    ),
+    "bow": (
+        "B AW1",
+        [
+            (
+                "prev",
+                {"my", "your", "her", "his", "pink", "red", "favorite", "favourite", "rain", "silver", "golden"},
+                "B OW1",
+            ),
+            ("next", {"tie", "ties", "arrow", "arrows", "string", "legged"}, "B OW1"),
+        ],
+    ),
     "wound": ("W UW1 N D", [("next", {"up", "down", "around", "round", "tight", "tighter", "back"}, "W AW1 N D")]),
     "use": ("Y UW1 Z", [("prev", {"no", "the", "what's", "whats", "any", "much", "of", "a", "there's"}, "Y UW1 S")]),
     "used": ("Y UW1 Z D", [("next", {"to", "ta"}, "Y UW1 S T")]),
     "bass": ("B EY1 S", []),
-    "desert": ("D EH1 Z ER0 T", [("prev", {"won't", "never", "not", "wouldn't", "don't", "didn't", "will", "would", "to",
-                                           "i'll", "can't", "gonna"}, "D IH0 Z ER1 T")]),
-    "excuse": ("IH0 K S K Y UW1 S", [("next", {"me", "my", "us", "him", "her", "them", "it", "yourself", "myself", "you"},
-                                      "IH0 K S K Y UW1 Z")]),
-    "record": ("R EH1 K ER0 D", [("prev", {"to", "let's", "gonna", "wanna", "will", "i'll", "we'll", "can", "can't",
-                                           "don't", "could"}, "R IH0 K AO1 R D")]),
+    "desert": (
+        "D EH1 Z ER0 T",
+        [
+            (
+                "prev",
+                {
+                    "won't",
+                    "never",
+                    "not",
+                    "wouldn't",
+                    "don't",
+                    "didn't",
+                    "will",
+                    "would",
+                    "to",
+                    "i'll",
+                    "can't",
+                    "gonna",
+                },
+                "D IH0 Z ER1 T",
+            )
+        ],
+    ),
+    "excuse": (
+        "IH0 K S K Y UW1 S",
+        [("next", {"me", "my", "us", "him", "her", "them", "it", "yourself", "myself", "you"}, "IH0 K S K Y UW1 Z")],
+    ),
+    "record": (
+        "R EH1 K ER0 D",
+        [
+            (
+                "prev",
+                {"to", "let's", "gonna", "wanna", "will", "i'll", "we'll", "can", "can't", "don't", "could"},
+                "R IH0 K AO1 R D",
+            )
+        ],
+    ),
     "reading": ("R IY1 D IH0 NG", []),
     "putting": ("P UH1 T IH0 NG", []),
     "perfect": ("P ER1 F IH0 K T", []),
     "sow": ("S OW1", []),
-    "dove": ("D AH1 V", [("prev", {"a", "the", "white", "little", "my", "like"}, "D AH1 V"),
-                         ("next", {"into", "in", "deep", "headfirst", "off", "under"}, "D OW1 V")]),
+    "dove": (
+        "D AH1 V",
+        [
+            ("prev", {"a", "the", "white", "little", "my", "like"}, "D AH1 V"),
+            ("next", {"into", "in", "deep", "headfirst", "off", "under"}, "D OW1 V"),
+        ],
+    ),
     "dr": ("D AA1 K T ER0", []),
 }
 
@@ -611,8 +1165,10 @@ FRENCH_WORDS_V3 = {"y": (("i", True),)}
 GERMAN_WORDS_V3 = {"'n": (("n", False),)}
 
 # English contractions in German/French lines (espeak-de read "we're" as vere, "won't" as vont).
-_EN_CONTRACTION = re.compile(r"^(i|you|we|they|he|she|it|that|what|there|let|who|where|how)'(m|re|ve|ll|d|s)$"
-                             r"|^[a-z]+n't$|^'(cause|cuz|bout|til|em)$")
+_EN_CONTRACTION = re.compile(
+    r"^(i|you|we|they|he|she|it|that|what|there|let|who|where|how)'(m|re|ve|ll|d|s)$"
+    r"|^[a-z]+n't$|^'(cause|cuz|bout|til|em)$"
+)
 
 
 def _english_contraction(lowered: str) -> bool:
@@ -626,8 +1182,12 @@ def _english_known(lowered: str) -> bool:
     """Whether a lower-cased word is English the English path knows (CMUdict, lexicon, dropped g)."""
     cmu = _cmudict()
     base = lowered.rstrip("'")
-    return (lowered in cmu or lowered.strip("'") in cmu or lowered in SLANG_EN
-            or (base.endswith("in") and base + "g" in cmu))
+    return (
+        lowered in cmu
+        or lowered.strip("'") in cmu
+        or lowered in SLANG_EN
+        or (base.endswith("in") and base + "g" in cmu)
+    )
 
 
 def _homograph(lowered: str, context: tuple | None) -> str:
@@ -644,20 +1204,26 @@ def _english_lexicons(lowered: str, context: tuple | None, sung: bool = False):
 
     ``sung`` (v3-sung): reduced vowels take their spelled vowel and CMUdict's reading is the one that
     aligns best with the spelling (``sung_vowels``); otherwise CMUdict's first reading as written."""
+
     def tokens_of(readings):
         if sung:
             return sung_vowels([arpabet_units(phones) for phones in readings], lowered)
         return tuple(arpabet_tokens(readings[0]))
+
     if lowered in SLANG_EN:
         return tokens_of([SLANG_EN[lowered].split()]), "slang"
     if lowered in HOMOGRAPHS_EN:
         return tokens_of([_homograph(lowered, context).split()]), "homograph"
     cmu = _cmudict()
     base = lowered.rstrip("'")
-    if (len(base) >= 4 and base.endswith("in") and base + "g" in cmu
-            and (lowered.endswith("in'") or base not in cmu or base in DROPPED_G_IN_CMU)):
+    if (
+        len(base) >= 4
+        and base.endswith("in")
+        and base + "g" in cmu
+        and (lowered.endswith("in'") or base not in cmu or base in DROPPED_G_IN_CMU)
+    ):
         readings = []
-        for reading in (cmu[base + "g"] if sung else cmu[base + "g"][:1]):
+        for reading in cmu[base + "g"] if sung else cmu[base + "g"][:1]:
             phones = list(reading)
             if phones[-1] == "NG":
                 phones[-1] = "N"  # sung as written: nothin' → nathin, gettin → getin
@@ -676,6 +1242,7 @@ def _english_lexicons(lowered: str, context: tuple | None, sung: bool = False):
 # ``@i`` (the v3 label after the @) until the phones are aligned to the word's letters; a slot over
 # exactly one vowel letter takes that letter (y reads i), any other slot keeps its v3 label.
 
+
 def arpabet_units(phones) -> list[tuple[str, bool]]:
     """arpabet_tokens with AH0 kept apart (as the slot ``@a``) before the stress digit is dropped."""
     units = []
@@ -689,14 +1256,30 @@ def arpabet_units(phones) -> list[tuple[str, bool]]:
 
 # Spellings of a consonant label besides the label itself (as cheap as the label's own letters).
 _GRAPHEMES = {
-    "k": {"c", "ck", "ch", "q", "qu", "cc", "kh", "x", "lk"}, "g": {"gg", "gh", "gu", "x"},
-    "f": {"ph", "gh", "ff"}, "s": {"c", "ss", "sc", "ps", "st", "x", "z"}, "z": {"s", "zz", "x", "ss"},
-    "sh": {"ti", "ci", "si", "ss", "ch", "sch", "s", "sci", "ce"}, "zh": {"s", "si", "g", "z", "ge"},
-    "ch": {"tch", "t", "ti", "c", "cz"}, "j": {"g", "dg", "dge", "gg", "ge", "gi", "d", "di"},
-    "dh": {"th"}, "th": {"th"}, "ng": {"n", "ngue"}, "t": {"tt", "ed", "th", "pt", "bt", "d"},
-    "d": {"dd", "ed", "ld", "t", "tt"}, "n": {"nn", "kn", "gn", "pn", "mn"}, "m": {"mm", "mb", "mn", "lm"},
-    "r": {"rr", "wr", "rh"}, "l": {"ll"}, "p": {"pp"}, "b": {"bb"}, "v": {"vv", "f", "ph"},
-    "w": {"wh", "u", "o"}, "y": {"i", "j", "e", "u"}, "h": {"wh"},
+    "k": {"c", "ck", "ch", "q", "qu", "cc", "kh", "x", "lk"},
+    "g": {"gg", "gh", "gu", "x"},
+    "f": {"ph", "gh", "ff"},
+    "s": {"c", "ss", "sc", "ps", "st", "x", "z"},
+    "z": {"s", "zz", "x", "ss"},
+    "sh": {"ti", "ci", "si", "ss", "ch", "sch", "s", "sci", "ce"},
+    "zh": {"s", "si", "g", "z", "ge"},
+    "ch": {"tch", "t", "ti", "c", "cz"},
+    "j": {"g", "dg", "dge", "gg", "ge", "gi", "d", "di"},
+    "dh": {"th"},
+    "th": {"th"},
+    "ng": {"n", "ngue"},
+    "t": {"tt", "ed", "th", "pt", "bt", "d"},
+    "d": {"dd", "ed", "ld", "t", "tt"},
+    "n": {"nn", "kn", "gn", "pn", "mn"},
+    "m": {"mm", "mb", "mn", "lm"},
+    "r": {"rr", "wr", "rh"},
+    "l": {"ll"},
+    "p": {"pp"},
+    "b": {"bb"},
+    "v": {"vv", "f", "ph"},
+    "w": {"wh", "u", "o"},
+    "y": {"i", "j", "e", "u"},
+    "h": {"wh"},
 }
 _VOWEL_LETTERS = frozenset("aeiouy")
 _SPELLED_VOWEL = {"a": "a", "e": "e", "i": "i", "o": "o", "u": "u", "y": "i"}
@@ -711,7 +1294,9 @@ def _unit_cost(label: str, letters: str) -> float:
     if not letters:  # a reduced vowel with no vowel letter (rhythm), the u of "use", the 2nd phone of x
         return 0.8 if label.startswith("@") else 0.3 if label in ("y", "w", "s", "z") else 1.5
     if vowel:
-        core = letters if label == "er" or label.startswith("@") else letters.rstrip("wyrh") or letters  # ay, ow; y alone
+        core = (
+            letters if label == "er" or label.startswith("@") else letters.rstrip("wyrh") or letters
+        )  # ay, ow; y alone
         allowed = _VOWEL_LETTERS | ({"r"} if label == "er" else set())
         return 0.2 if core and set(core) <= allowed and len(letters) <= 4 else 9.0
     return 0.0 if letters == label or letters in _GRAPHEMES.get(label, ()) else 9.0
@@ -738,7 +1323,7 @@ def align_spelling(units, word: str) -> tuple[float, list[str], list[int]]:
                     cost[i + 1][j], back[i + 1][j] = step, (i, j)
             if j < m:
                 for k in range(0, min(4, n - i) + 1):
-                    step = here + _unit_cost(units[j][0], letters[i:i + k])
+                    step = here + _unit_cost(units[j][0], letters[i : i + k])
                     if step < cost[i + k][j + 1]:
                         cost[i + k][j + 1], back[i + k][j + 1] = step, (i, j)
     spans, starts = [""] * m, [0] * m
@@ -778,8 +1363,9 @@ def _abbreviation(word: str) -> bool:
     a doubled letter (km, dms, fr). Doubled letters are onomatopoeia (brr, psst, skrrt)."""
     if word.upper() in ACRONYMS:
         return True
-    return (2 <= len(word) <= 4 and not any(c in "aeiouy" for c in word)
-            and not any(a == b for a, b in zip(word, word[1:])))
+    return (
+        2 <= len(word) <= 4 and not any(c in "aeiouy" for c in word) and not any(a == b for a, b in zip(word, word[1:]))
+    )
 
 
 def _cmu_spellout(word: str, tokens) -> bool:
@@ -845,7 +1431,7 @@ def word_pronunciation_v3(word: str, language: str, context: tuple | None = None
             return FRENCH_WORDS_V3[lowered], "lexicon", language
         match = _CLITIC.match(lowered)
         if match and len(lowered) > match.end():
-            rest, source, _ = word_pronunciation_v3(lowered[match.end():], language, sung=sung)
+            rest, source, _ = word_pronunciation_v3(lowered[match.end() :], language, sung=sung)
             if source == "letter_spellout":
                 return (), source, language
             return FRENCH_CLITICS[match.group(1)] + rest, source, language
@@ -902,8 +1488,9 @@ def aligned_surface(tokens, word: str) -> list[str] | None:
     return [word[a:b] for a, b in zip(edges, edges[1:])]
 
 
-def pronunciation_items_v3(word: str, language: str, spell, context: tuple | None = None,
-                           sung: bool = False) -> tuple[list[dict], str]:
+def pronunciation_items_v3(
+    word: str, language: str, spell, context: tuple | None = None, sung: bool = False
+) -> tuple[list[dict], str]:
     """v3 counterpart of pronunciation_items; a letter spell-out falls back to ``spell`` with repeated
     letters collapsed (skrrt → skrt)."""
     lowered = word.lower().translate(_APOS_MAP)
@@ -931,24 +1518,46 @@ def pronunciation_items_v3(word: str, language: str, spell, context: tuple | Non
 # Per-line language (v3). fastText lid.176 (the compressed .ftz, CC BY-SA 3.0, the model the manifest
 # builder's document-level LID uses); the file is pinned by hash so training and inference agree.
 LID_SHA256 = "8f3472cfe8738a7b6099e8e999c3cbfae0dcd15696aac7d7738a8039db603e83"
-LID_CANDIDATES = ("/opt/echora_kara/lid.176.ftz", str(Path(__file__).resolve().parents[3] / "resources" / "lid.176.ftz"))
+LID_CANDIDATES = (
+    "/opt/echora_kara/lid.176.ftz",
+    str(Path(__file__).resolve().parents[3] / "resources" / "lid.176.ftz"),
+)
 _LID_WORD = re.compile(r"[^\W\d_]+(?:['’ʼ][^\W\d_]+)*")
-LID_ALPHABETS = {"de": frozenset("abcdefghijklmnopqrstuvwxyzäöüß'"),
-                 "fr": frozenset("abcdefghijklmnopqrstuvwxyzàâæçéèêëîïôœùûüÿ'")}
+LID_ALPHABETS = {
+    "de": frozenset("abcdefghijklmnopqrstuvwxyzäöüß'"),
+    "fr": frozenset("abcdefghijklmnopqrstuvwxyzàâæçéèêëîïôœùûüÿ'"),
+}
 # A German/French line inside an English song also needs two of that language's function words or one
 # of its accented letters (fastText calls patois "dem … dem" lines German).
-LID_EVIDENCE = {"de": (frozenset("ich und nicht ist du der die das ein eine einen mein meine dich mich mir dir wir ihr "
-                                 "auf mit für zu nur auch noch wie was wenn aber nein ja sie es".split()), "äöüß"),
-                "fr": (frozenset("je tu il elle nous vous le la les des du et est pas que qui mon ma mes ton ta tes un "
-                                 "une dans pour avec moi toi suis c'est j'ai sur au aux ce".split()), "éèêàçùâîôœ")}
+LID_EVIDENCE = {
+    "de": (
+        frozenset(
+            "ich und nicht ist du der die das ein eine einen mein meine dich mich mir dir wir ihr "
+            "auf mit für zu nur auch noch wie was wenn aber nein ja sie es".split()
+        ),
+        "äöüß",
+    ),
+    "fr": (
+        frozenset(
+            "je tu il elle nous vous le la les des du et est pas que qui mon ma mes ton ta tes un "
+            "une dans pour avec moi toi suis c'est j'ai sur au aux ce".split()
+        ),
+        "éèêàçùâîôœ",
+    ),
+}
 
 
 def lid_model_path() -> str:
+    """fastText lid.176.ftz path: ``ECHORA_KARA_LID_MODEL`` or the first existing ``LID_CANDIDATES``; raises if
+    neither."""
     import os
+
     found = os.environ.get("ECHORA_KARA_LID_MODEL") or next((p for p in LID_CANDIDATES if os.path.exists(p)), None)
     if not found or not os.path.exists(found):
-        raise RuntimeError("label rules v3 need fastText lid.176.ftz: set ECHORA_KARA_LID_MODEL "
-                           f"(sha256 {LID_SHA256}) or install it at {LID_CANDIDATES[0]}")
+        raise RuntimeError(
+            "label rules v3 need fastText lid.176.ftz: set ECHORA_KARA_LID_MODEL "
+            f"(sha256 {LID_SHA256}) or install it at {LID_CANDIDATES[0]}"
+        )
     return found
 
 
@@ -956,6 +1565,7 @@ def lid_model_path() -> str:
 def _lid_model():
     import hashlib
     import os
+
     path = lid_model_path()
     with open(path, "rb") as source:
         digest = hashlib.file_digest(source, "sha256").hexdigest()
@@ -985,8 +1595,11 @@ def line_language(line: str, language: str) -> str:
     goes to English G2P. Lines of fewer than two Latin words keep the song's language."""
     if language not in PRONUNCIATION_LANGUAGES:
         return language
-    words = [w.lower().translate(_APOS_MAP) for w in _LID_WORD.findall(line)
-             if all("LATIN" in unicodedata.name(c, "") or c in _APOSTROPHES for c in w)]
+    words = [
+        w.lower().translate(_APOS_MAP)
+        for w in _LID_WORD.findall(line)
+        if all("LATIN" in unicodedata.name(c, "") or c in _APOSTROPHES for c in w)
+    ]
     if len(words) < 2:
         return language
     top, confidence = line_lid(" ".join(words))
@@ -1054,7 +1667,7 @@ def latin_run_languages(runs, language: str, rules: LabelRules) -> dict[int, str
         # barriers. Never join two foreign words across an intervening non-Latin word/number.
         if previous is not None and any(
             not all(c.isspace() or unicodedata.category(c).startswith("P") for c in gap)
-            for _, gap in runs[previous + 1:i]
+            for _, gap in runs[previous + 1 : i]
         ):
             flush(group, status)
             group, status = [], None

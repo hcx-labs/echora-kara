@@ -9,6 +9,7 @@ Within a word, the letter at a frame is the same weak proportional estimate the 
 neighbouring letters' outputs are not graded on that frame. One frame at each token edge is not
 graded either, matching the softmax labels' boundary tolerance.
 """
+
 from __future__ import annotations
 
 import math
@@ -22,6 +23,7 @@ CHANNELS = (*LETTERS, PAD_TOKEN_ID)  # graded outputs; any other vocabulary entr
 
 
 def frame_span(start: float, end: float, frames: int) -> range:
+    """Frames (clipped to ``[0, frames)``) whose receptive-field centers fall in ``[start, end)`` seconds."""
     first = max(0, math.ceil((start - FRAME_OFFSET_SECONDS) / FRAME_STRIDE_SECONDS - 1e-9))
     stop = min(frames, math.ceil((end - FRAME_OFFSET_SECONDS) / FRAME_STRIDE_SECONDS - 1e-9))
     return range(first, stop)
@@ -46,10 +48,10 @@ def multilabel_targets(tokens: list[dict], frames: int, vocab_size: int, edge_to
             continue
         span = frame_span(start, end, frames)
         if token.get("ignore") or not token.get("ids"):
-            masked[span.start:span.stop] = True
+            masked[span.start : span.stop] = True
             continue
         ids = token["ids"]
-        active[span.start:span.stop] += 1
+        active[span.start : span.stop] += 1
         for frame in span:
             center = FRAME_OFFSET_SECONDS + frame * FRAME_STRIDE_SECONDS
             index = min(len(ids) - 1, max(0, int((center - start) * len(ids) / (end - start))))
@@ -72,8 +74,9 @@ def multilabel_targets(tokens: list[dict], frames: int, vocab_size: int, edge_to
     return targets, graded, active >= 2
 
 
-def aligned_overlap_targets(tokens: list[dict], frames: int, vocab_size: int, edge_tolerance: int = 1,
-                            overlap_token_weight: float = 4.0):
+def aligned_overlap_targets(
+    tokens: list[dict], frames: int, vocab_size: int, edge_tolerance: int = 1, overlap_token_weight: float = 4.0
+):
     """Aligned targets: each word is aligned in order over its own frames, no guessed letter split.
 
     Returns a dict:
@@ -98,10 +101,10 @@ def aligned_overlap_targets(tokens: list[dict], frames: int, vocab_size: int, ed
             continue
         span = frame_span(start, end, frames)
         if token.get("ignore") or not token.get("ids"):
-            masked[span.start:span.stop] = True
+            masked[span.start : span.stop] = True
             continue
         ids = [int(i) for i in token["ids"]]
-        active[span.start:span.stop] += 1
+        active[span.start : span.stop] += 1
         lo, hi = max(0, span.start - edge_tolerance), min(frames, span.stop + edge_tolerance)
         near[lo:hi] = True
         allowed[lo:hi][:, sorted(set(ids))] = True
@@ -118,5 +121,10 @@ def aligned_overlap_targets(tokens: list[dict], frames: int, vocab_size: int, ed
     negative[masked] = False
     silence = (active == 0).astype(np.float32)
     silence_graded = ~masked & ((active > 0) | ~near)
-    return {"regions": regions, "negative": negative, "silence": silence,
-            "silence_graded": silence_graded, "overlap": overlap}
+    return {
+        "regions": regions,
+        "negative": negative,
+        "silence": silence,
+        "silence_graded": silence_graded,
+        "overlap": overlap,
+    }

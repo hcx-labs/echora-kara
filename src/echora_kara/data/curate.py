@@ -5,6 +5,7 @@ Input manifests hold rows with ``timings`` and an ``audio`` path relative to ``-
 pass probes the actual audio duration with ffprobe, excludes corrupt/mismatched files, and writes
 curated manifests without copying audio. build_manifest.py reuses ``duration``.
 """
+
 import argparse
 import json
 import math
@@ -26,10 +27,12 @@ WORKERS = 8
 
 
 def duration(path: Path) -> float | None:
+    """Container duration of an audio file in seconds from ffprobe, or None when it fails or is not positive."""
     try:
         output = subprocess.check_output(
             ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=nw=1:nk=1", str(path)],
-            text=True, timeout=30,
+            text=True,
+            timeout=30,
         )
         value = float(output.strip())
         return value if math.isfinite(value) and value > 0 else None
@@ -38,25 +41,30 @@ def duration(path: Path) -> float | None:
 
 
 def probe_audio(path: Path) -> tuple[float | None, str | None]:
+    """(ffprobe duration in seconds, SHA-256 hex of the file bytes), or (None, None) when either fails."""
     actual = duration(path)
     if actual is None:
         return None, None
     try:
-        with path.open('rb') as audio:
-            digest = hashlib.file_digest(audio, 'sha256').hexdigest()
+        with path.open("rb") as audio:
+            digest = hashlib.file_digest(audio, "sha256").hexdigest()
     except OSError:
         return None, None
     return actual, digest
 
 
 def valid(row: dict, actual_duration: float | None) -> tuple[bool, str]:
+    """(ok, reason) for one manifest row against its probed duration: catalog agreement, finite and ordered
+    intervals, some supervision, no lyrics past the audio end, and usable lyrics spanning at least 25 % of it."""
     if actual_duration is None or not math.isfinite(actual_duration) or actual_duration <= 0:
         return False, "ffprobe_failed"
     catalog = row.get("duration")
-    limit = MAX_VERIFIED_DURATION_DIFF_SECONDS if row.get("audio_match_status") == "exact_isrc" \
+    limit = (
+        MAX_VERIFIED_DURATION_DIFF_SECONDS
+        if row.get("audio_match_status") == "exact_isrc"
         else MAX_CATALOG_DURATION_DIFF_SECONDS
-    if not isinstance(catalog, (int, float)) or not math.isfinite(catalog) or \
-            abs(actual_duration - catalog) > limit:
+    )
+    if not isinstance(catalog, (int, float)) or not math.isfinite(catalog) or abs(actual_duration - catalog) > limit:
         return False, "catalog_duration_mismatch"
     units = [unit for line in row["timings"] for unit in line]
     if any(not math.isfinite(unit[k]) for unit in units for k in ("start", "end")):
@@ -74,6 +82,11 @@ def valid(row: dict, actual_duration: float | None) -> tuple[bool, str]:
 
 
 def main() -> None:
+    """Probe every row of ``--source``'s train/validation/test manifests and write the passing rows to ``--output``.
+
+    Rejects duplicate or cross-split ids, audio paths and artists, failed identity checks, provenance hash mismatches
+    and duplicate audio content. Kept rows get the probed duration, the file hash and timings clipped to the audio;
+    a ``summary.json`` with rejection counts is written alongside."""
     parser = argparse.ArgumentParser()
     parser.add_argument("--source", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
@@ -105,8 +118,8 @@ def main() -> None:
             ok, reason = valid(row, actual)
             if ok and (problem := identity_problem(row, split)):
                 ok, reason = False, problem
-            if ok and row.get('audio_match_status') == 'exact_isrc' and row.get('audio_sha256') != digest:
-                ok, reason = False, 'audio_provenance_mismatch'
+            if ok and row.get("audio_match_status") == "exact_isrc" and row.get("audio_sha256") != digest:
+                ok, reason = False, "audio_provenance_mismatch"
             results[row["id"]] = (ok, reason, actual, digest)
     # Only kept rows compete; a rejected copy must not remove a good one.
     digests = Counter(result[3] for result in results.values() if result[0])
@@ -115,9 +128,9 @@ def main() -> None:
     for split, row in all_rows:
         ok, reason, actual, digest = results[row["id"]]
         if ok and digests[digest] > 1:
-            ok, reason = False, 'duplicate_audio_content'
+            ok, reason = False, "duplicate_audio_content"
         if ok:
-            row['audio_sha256'] = digest
+            row["audio_sha256"] = digest
             row["catalog_duration"] = row["duration"]
             row["duration"] = actual
             row["duration_source"] = "ffprobe_format"
@@ -142,11 +155,15 @@ def main() -> None:
         "total": sum(map(len, kept.values())),
         "rejected": rejected,
         "audio_duration_tolerance_seconds": TOLERANCE_SECONDS,
-        "max_catalog_duration_diff_seconds": {"unverified": MAX_CATALOG_DURATION_DIFF_SECONDS,
-                                              "exact_isrc": MAX_VERIFIED_DURATION_DIFF_SECONDS},
-        "identity_policy": {"exact_isrc_required": list(VERIFIED_SPLITS),
-                            "train_audio_statuses": sorted(TRAIN_AUDIO_STATUSES),
-                            "train_lyric_statuses": sorted(TRAIN_LYRIC_STATUSES)},
+        "max_catalog_duration_diff_seconds": {
+            "unverified": MAX_CATALOG_DURATION_DIFF_SECONDS,
+            "exact_isrc": MAX_VERIFIED_DURATION_DIFF_SECONDS,
+        },
+        "identity_policy": {
+            "exact_isrc_required": list(VERIFIED_SPLITS),
+            "train_audio_statuses": sorted(TRAIN_AUDIO_STATUSES),
+            "train_lyric_statuses": sorted(TRAIN_LYRIC_STATUSES),
+        },
         "duplicate_detection": "encoded file SHA-256; different encodings require fingerprint/manual QC",
     }
     (output_dir / "summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2) + "\n")
