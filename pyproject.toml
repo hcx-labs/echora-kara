@@ -15,7 +15,7 @@ dependencies = [
   "numpy==2.5.2",
   "torch==2.13.0",
   "torchaudio==2.11.0",
-  "transformers==5.15.1",
+  "transformers>=5.15.1,<5.17",
   "safetensors>=0.4",
   "muq==0.1.0",
   "librosa==0.11.0",
@@ -39,7 +39,8 @@ dependencies = [
 
 [project.optional-dependencies]
 data = ["scipy>=1.13"]
-train = ["scipy>=1.13", "wandb"]
+# The versions the reference run trained with (resume reproduces its batches and optimizer state).
+train = ["scipy>=1.13", "transformers==5.16.1", "accelerate==1.14.0", "wandb==0.29.0"]
 dev = ["pytest"]
 
 [project.scripts]

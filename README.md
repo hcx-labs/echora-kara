@@ -247,6 +247,21 @@ Useful extras:
 - `--fusion-lora-grow` widens a checkpoint's MuQ LoRA (rank, blocks or targets) without changing its
   output at step 0.
 
+#### Continuing the reference run on another machine
+
+[`scripts/train_v3k_sung_lora32.sh`](scripts/train_v3k_sung_lora32.sh) holds the exact arguments of the
+reference run. With `--resume` it continues from the newest checkpoint, restoring the optimizer, schedule and
+random state, and skips the batches already trained, so no song is seen twice in the epoch.
+
+```sh
+pip install -e '.[train]' && sh scripts/fetch_resources.sh     # plus espeak-ng and ffmpeg
+# Copy the dataset to /datasets and the run directories to /runs (layout in the script's header), then:
+DATASET=/datasets sh scripts/train_v3k_sung_lora32.sh --resume
+```
+
+Resume refuses to start if the run's recorded identity differs: keep the run directory at `/runs`, the same
+manifests, and a single GPU.
+
 ## License
 
 Echora Kara is licensed under the [GNU Affero General Public License v3.0](LICENSE).
