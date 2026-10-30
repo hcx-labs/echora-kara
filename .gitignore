@@ -1,0 +1,12 @@
+__pycache__/
+*.egg-info/
+.venv/
+build/
+dist/
+# Downloaded resources (scripts/fetch_resources.sh)
+src/echora_kara/text/dictionaries/*
+!src/echora_kara/text/dictionaries/SHA256SUMS
+resources/
+# Training outputs
+runs/
+wandb/

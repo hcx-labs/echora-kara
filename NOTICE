@@ -1,0 +1,42 @@
+Echora Kara
+Copyright (C) 2026 Muhammad Fahad Baig
+Licensed under the GNU Affero General Public License v3.0 (see LICENSE).
+
+This project began as a fork of FA-Kara and has since been largely rewritten. Portions of the inference
+and lyric-normalization code still derive from FA-Kara, which is distributed under the MIT License:
+
+----------------------------------------------------------------------------------------------------
+MIT License
+
+Copyright (c) 2025 moriwx
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+----------------------------------------------------------------------------------------------------
+
+FA-Kara itself drew on yohane (https://github.com/Japan7/yohane) and Forced-Alignment-For-NicoKara
+(https://github.com/oHEILIo/Forced-Alignment-For-NicoKara).
+
+Third-party models and data used at runtime (not distributed with this repository):
+- omniASR CTC 300M v2, Meta (Apache-2.0): initial acoustic encoder weights.
+- MuQ-large-msd-iter, Tencent AI Lab (model weights CC BY-NC 4.0): frozen music-feature encoder.
+  Models that include the MuQ fusion branch inherit its non-commercial condition.
+- fastText lid.176 (CC BY-SA 3.0): language identification.
+- JMdict furigana segmentation and KANJIDIC2, EDRDG (CC BY-SA 4.0): Japanese readings.
+- CMU Pronouncing Dictionary (BSD-style), via NLTK.
+- espeak-ng (GPL-3.0) through phonemizer (GPL-3.0): English, German and French pronunciations.
