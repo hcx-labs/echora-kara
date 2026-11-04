@@ -48,6 +48,7 @@ from transformers.trainer_utils import get_last_checkpoint
 
 from echora_kara.train.targets import (
     ctc_regions as find_ctc_regions,
+    frame_index,
     frame_labels,
     ignore_unregioned,
     tolerant_frame_targets,
@@ -61,9 +62,13 @@ from echora_kara.model import muq_fusion  # noqa: E402
 from echora_kara.model.song_text import canonical_tokens, text_features, CURRENT_VERSION
 from echora_kara.train.checkpoints import mark_and_prune, validate_resume
 from echora_kara.model import text_aligner as ta  # noqa: E402  (text-conditioned head, shared with inference)
+from echora_kara.train import decoder_margin as dm
 
 SAMPLE_RATE = 16_000
 PAD_TOKEN_ID = 29
+# torchrun sets these per process; a plain `python -m echora_kara.train.train` is one process on GPU 0.
+LOCAL_RANK = int(os.environ.get("LOCAL_RANK", 0))
+WORLD_SIZE = int(os.environ.get("WORLD_SIZE", 1))
 
 
 @dataclass(frozen=True)
@@ -223,6 +228,16 @@ class AlignerMixin:
     # text_fs_mode: "ctc" (forward-sum over token columns) or "region" (blank-free token filling of fragments).
     text_fs_mode = "ctc"
     region_loss = "constrained_alignment"
+    # Decoder margin (decoder_margin.py): structured hinge on the production decoder's own pick over the window
+    # (cost-augmented by start error) against the measured path. Weight 0: not computed.
+    decoder_margin_weight = 0.0
+    decoder_margin_scale = 0.1
+    decoder_margin_tolerance = 1
+    decoder_margin_cap = 25
+    decoder_margin_activity = dm.ACTIVITY
+    decoder_margin_gap_cost = dm.GAP_COST
+    decoder_margin_bonus = dm.BONUS
+    decoder_margin_ramp = 1.0  # DecoderMarginRamp: share of the weight applied at this step
     # Focal weighting shrinks easy frames, and blank frames are nearly always
     # easy. Against an unweighted region loss that starves the blank signal and
     # letters spill into silence, so region-loss runs use plain cross-entropy.
@@ -417,6 +432,9 @@ class AlignerMixin:
         ta_back_lengths=None,
         ta_lead_regions=None,
         ta_back_regions=None,
+        frame_counts=None,
+        dm_lines=None,
+        dm_columns=None,
         **kwargs,
     ):
         """Focal frame loss, plus a region loss inside each whole source fragment.
@@ -576,6 +594,47 @@ class AlignerMixin:
             terms.append(("text", self.text_aligner_weight, lead_loss + self.text_back_weight * back_loss))
             parts.update({f"text_lead_{k}": v.float() for k, v in lead_stats.items()})
             parts.update({f"text_back_{k}": v.float() for k, v in back_stats.items()})
+            lead = text_parts[ta.LEAD]
+            lead_tokens = lead["token"] if "token" in lead else F.log_softmax(lead["combined"][..., 1:], -1)
+        else:
+            lead_tokens = None
+        weight = self.decoder_margin_weight * (self.decoder_margin_ramp if self.training else 1.0)
+        if (
+            self.decoder_margin_weight
+            and ctc_regions is not None
+            and frame_counts is not None
+            and (weight or not self.training)
+        ):
+            # The production decoder's own pick against the measured path (decoder_margin.py); its text bonus
+            # reads the lead-token share of the text head, so the hinge trains that head too.
+            if input_values is None:
+                samples = None
+            elif attention_mask is not None:
+                samples = attention_mask.sum(1)
+            else:
+                samples = torch.full((input_values.shape[0],), input_values.shape[1])
+            margin, margin_stats = dm.decoder_margin_loss(
+                F.log_softmax(output.logits.float(), dim=-1),
+                ctc_regions,
+                ctc_targets,
+                frame_counts,
+                blank=PAD_TOKEN_ID,
+                region_lines=dm_lines,
+                region_columns=dm_columns,
+                token_log_probs=lead_tokens if dm_columns is not None else None,
+                waveforms=input_values,
+                sample_counts=samples,
+                scale=self.decoder_margin_scale,
+                tolerance=self.decoder_margin_tolerance,
+                cap=self.decoder_margin_cap,
+                activity=self.decoder_margin_activity,
+                gap_cost=self.decoder_margin_gap_cost,
+                bonus=self.decoder_margin_bonus,
+            )
+            loss = loss + weight * margin
+            parts["decoder_margin"] = margin.detach().float()
+            parts["decoder_margin_per_window"] = margin_stats["per_window"].to(margin.device)
+            terms.append(("decoder_margin", weight, margin))
         if background_logits is not None and bg_labels is not None and self.background_loss_weight:
             background_part = self.stream_loss(
                 background_logits,
@@ -1041,6 +1100,41 @@ def text_frame_targets(song: dict, voice: int, decode_start: float, frames: int,
     return targets, [column for _, column in sorted(sequence)]
 
 
+def region_meta(
+    tokens: list[dict],
+    regions: list[tuple[int, int, list[int]]],
+    clock: "FrameClock",
+    decode_start: float,
+    song: dict | None,
+) -> list[tuple[int, list[int]]]:
+    """Decoder margin: per region of ``ctc_regions`` (same order) its lyric line and, per letter, the text head's
+    lead-token column (the song-text token sung at that token's midpoint; -1 without one or without a head)."""
+    members: dict[tuple[int, int], list[dict]] = {}
+    for token in tokens:
+        if not token.get("ignore") and "region_start" in token:
+            key = (
+                max(0, frame_index(token["region_start"], clock.stride_seconds, clock.offset_seconds)),
+                frame_index(token["region_end"], clock.stride_seconds, clock.offset_seconds),
+            )
+            members.setdefault(key, []).append(token)
+    out = []
+    for first, stop, ids in regions:
+        found = next((v for (a, b), v in members.items() if a == first and min(b, stop) == stop), [])
+        found = sorted(found, key=lambda t: t["start"])
+        columns = []
+        for token in found:
+            column = -1
+            if song is not None:
+                middle = decode_start + (token["start"] + token["end"]) / 2
+                hits = np.nonzero((song["voice"] == ta.LEAD) & (song["start"] <= middle) & (song["end"] > middle))[0]
+                column = int(hits[0]) if len(hits) else -1
+            columns.extend([column] * len(token["ids"]))
+        if len(columns) != len(ids):
+            columns = [-1] * len(ids)
+        out.append((int(found[0].get("line", 0)) if found else 0, columns))
+    return out
+
+
 def text_regions(song: dict, voice: int, decode_start: float, frames: int, clock: "FrameClock", gap: float = 0.02):
     """--text-fs-mode region: groups of a voice's tokens sung back to back (gaps <= ``gap`` s) as
     (first frame, stop frame, [columns in time order]) inside the window, for the blank-free token filling."""
@@ -1500,6 +1594,24 @@ class AlignmentCollator:
                 for column, (first, stop, ids) in enumerate(found):
                     batch["ctc_regions"][row, column] = torch.tensor([first, stop, len(ids)])
                     batch["ctc_targets"][row, column, : len(ids)] = torch.tensor(ids)
+            if getattr(self.model, "decoder_margin_weight", 0.0):
+                batch["frame_counts"] = torch.tensor([len(x) for x in labels], dtype=torch.long)
+                meta = [
+                    region_meta(
+                        example["tokens"],
+                        found,
+                        self.clock,
+                        example["decode_start"],
+                        self.song_text.get(example["song_id"]) if self.song_text else None,
+                    )
+                    for example, found in zip(examples, regions)
+                ]
+                batch["dm_lines"] = torch.zeros((len(examples), most_regions), dtype=torch.long)
+                batch["dm_columns"] = torch.full((len(examples), most_regions, longest), -1, dtype=torch.long)
+                for row, found in enumerate(meta):
+                    for column, (line, columns) in enumerate(found):
+                        batch["dm_lines"][row, column] = line
+                        batch["dm_columns"][row, column, : len(columns)] = torch.tensor(columns)
         return batch
 
 
@@ -1555,6 +1667,19 @@ class DivergenceGuard(TrainerCallback):
             )
             control.should_training_stop = True
         self.best = loss if self.best is None else min(self.best, loss)
+
+
+class DecoderMarginRamp(TrainerCallback):
+    """--decoder-margin-start-step / --decoder-margin-ramp-steps: no decoder margin before the start step (the
+    decoder's pick on an untrained model is noise), then its weight rises linearly to full over the ramp."""
+
+    def __init__(self, model, start: int, ramp: int):
+        self.model, self.start, self.ramp = model, start, ramp
+
+    def on_step_begin(self, args, state, control, **kwargs):
+        """Set this step's share of the decoder-margin weight on the model."""
+        done = state.global_step - self.start
+        self.model.decoder_margin_ramp = 0.0 if done < 0 else min(1.0, (done + 1) / max(1, self.ramp))
 
 
 class HeadWarmup(TrainerCallback):
@@ -1873,7 +1998,15 @@ class PartsTrainer(Trainer):
         """The usual evaluation, then the whole-song decoded-timing eval (when configured) logged as ``eval_*``."""
         metrics = super().evaluate(*args, **kwargs)
         if self.decoded_eval is not None:
-            extra = {f"eval_{k}": v for k, v in self.decoded_eval.run(self.model, self.args.device).items()}
+            # torchrun: rank 0 decodes the songs once and every rank takes its numbers (same best checkpoint).
+            extra = [
+                {f"eval_{k}": v for k, v in self.decoded_eval.run(self.model, self.args.device).items()}
+                if self.args.process_index == 0
+                else None
+            ]
+            if self.args.world_size > 1:
+                torch.distributed.broadcast_object_list(extra, src=0)
+            extra = extra[0]
             self.log(extra)
             metrics.update(extra)
         return metrics
@@ -1992,6 +2125,11 @@ def arguments():
     parser.add_argument("--max-steps", type=int, default=-1)
     parser.add_argument("--epochs", type=float, default=3.0)
     parser.add_argument("--train-limit", type=int)
+    parser.add_argument(
+        "--no-gradient-checkpointing",
+        action="store_true",
+        help="Keep activations instead of recomputing them (faster; for large-memory GPUs such as 80 GB cards).",
+    )
     parser.add_argument(
         "--eval-limit", type=int, default=None, help="Optional debug cap. Leave unset for full validation."
     )
@@ -2310,6 +2448,59 @@ def arguments():
     s1.add_argument(
         "--edge-tolerance-frames", type=int, default=1, help="Ungraded BCE frames on each side of a fragment start."
     )
+    margin = parser.add_argument_group("decoder margin (off by default; zero trains exactly as before)")
+    margin.add_argument(
+        "--decoder-margin-weight",
+        type=float,
+        default=0.0,
+        help="Add the structured hinge on the production decoder (decoder_margin.py) with this weight: the decoder's "
+        "best path over the window, charged for start error, against the measured path.",
+    )
+    margin.add_argument(
+        "--decoder-margin-scale",
+        type=float,
+        default=0.1,
+        help="Margin in nats per frame (20 ms) that a fragment's decoded start misses its measured start.",
+    )
+    margin.add_argument(
+        "--decoder-margin-tolerance-frames",
+        type=int,
+        default=1,
+        help="Start misses up to this many frames cost nothing.",
+    )
+    margin.add_argument(
+        "--decoder-margin-cap-frames",
+        type=int,
+        default=25,
+        help="A start miss costs at most this many frames (25 = 500 ms).",
+    )
+    margin.add_argument(
+        "--decoder-margin-start-step", type=int, default=0, help="No decoder margin before this optimizer step."
+    )
+    margin.add_argument(
+        "--decoder-margin-ramp-steps",
+        type=int,
+        default=0,
+        help="Then raise its weight linearly to full over this many steps.",
+    )
+    margin.add_argument(
+        "--decoder-margin-activity",
+        type=float,
+        default=dm.ACTIVITY,
+        help="Decoder's vocal-activity penalty weight (inference default; 0: off).",
+    )
+    margin.add_argument(
+        "--decoder-margin-gap-cost",
+        type=float,
+        default=dm.GAP_COST,
+        help="Decoder's in-line gap cost per blank frame (inference default; 0: off).",
+    )
+    margin.add_argument(
+        "--decoder-margin-bonus",
+        type=float,
+        default=dm.BONUS,
+        help="Decoder's text-head bonus (inference default; 0: off, or no text head).",
+    )
     fusion = parser.add_argument_group("MuQ fusion (off by default)")
     fusion.add_argument(
         "--fusion",
@@ -2378,6 +2569,20 @@ def arguments():
     args = parser.parse_args()
     if args.edge_loss_weight < 0 or args.edge_tolerance_frames < 0:
         parser.error("--edge-loss-weight and --edge-tolerance-frames must be non-negative")
+    if (
+        args.decoder_margin_weight < 0
+        or args.decoder_margin_scale < 0
+        or args.decoder_margin_tolerance_frames < 0
+        or args.decoder_margin_cap_frames < 1
+        or args.decoder_margin_start_step < 0
+        or args.decoder_margin_ramp_steps < 0
+        or args.decoder_margin_activity < 0
+        or args.decoder_margin_gap_cost < 0
+        or args.decoder_margin_bonus < 0
+    ):
+        parser.error("--decoder-margin-* must be non-negative (cap at least 1 frame)")
+    if args.decoder_margin_weight and args.loss not in REGION_LOSSES:
+        parser.error("--decoder-margin-weight needs a region loss (the measured fragments are the gold path)")
     if args.boundary_tolerance_frames < 0:
         parser.error("--boundary-tolerance-frames must be non-negative")
     if args.freeze_encoder_steps < 0 or (args.freeze_encoder_steps and args.freeze_encoder_steps >= args.max_steps):
@@ -2597,7 +2802,8 @@ def main():
             model.warm_start_fusion()
         if model.fusion_lora is not None and any(key.startswith("fusion_lora.") for key in loading["missing_keys"]):
             model.fusion_lora.reset_parameters()  # fresh LoRA: B = 0, the model is unchanged at step 0
-        model.attach_fusion_backbone(muq_fusion.MuQBranch(args.fusion_model, device="cuda"))
+        # Under torchrun each rank loads MuQ onto its own GPU (it also follows its input there at forward time).
+        model.attach_fusion_backbone(muq_fusion.MuQBranch(args.fusion_model, device=f"cuda:{LOCAL_RANK}"))
     if text_head:
         missing_text = [k for k in loading["missing_keys"] if k.startswith("text_aligner.")]
         if missing_text:
@@ -2630,6 +2836,13 @@ def main():
     model.edge_loss_weight = args.edge_loss_weight
     model.edge_positive_weight = args.edge_positive_weight
     model.edge_emd_weight = args.edge_emd_weight
+    model.decoder_margin_weight = args.decoder_margin_weight
+    model.decoder_margin_scale = args.decoder_margin_scale
+    model.decoder_margin_tolerance = args.decoder_margin_tolerance_frames
+    model.decoder_margin_cap = args.decoder_margin_cap_frames
+    model.decoder_margin_activity = args.decoder_margin_activity
+    model.decoder_margin_gap_cost = args.decoder_margin_gap_cost
+    model.decoder_margin_bonus = args.decoder_margin_bonus
     if overlap and any(key.startswith("overlap_head") for key in loading["missing_keys"]):
         model.warm_start_overlap_head()
     model.overlap_loss_weight = args.overlap_loss_weight
@@ -2708,6 +2921,12 @@ def main():
         ),
         flush=True,
     )
+    if WORLD_SIZE > 1:
+        print(
+            f"torchrun: {WORLD_SIZE} GPUs x batch {args.batch_size} x accumulation {args.gradient_accumulation} = "
+            f"{WORLD_SIZE * args.batch_size * args.gradient_accumulation} windows per step",
+            flush=True,
+        )
     train_args = TrainingArguments(
         output_dir=str(args.output),
         run_name=args.run_name,
@@ -2723,7 +2942,7 @@ def main():
         else (1000 if args.max_steps < 0 else max(1, args.max_steps // 10)),
         bf16=True,
         tf32=True,
-        gradient_checkpointing=not args.freeze_encoder,
+        gradient_checkpointing=not args.freeze_encoder and not args.no_gradient_checkpointing,
         eval_strategy="steps",
         eval_steps=args.eval_steps,
         save_strategy="steps",
@@ -2733,6 +2952,18 @@ def main():
         # which the region losses deliberately stop enforcing.
         logging_steps=10,
         report_to=["wandb"],
+        # torchrun (DDP): the encoder-freeze warm-up and unused heads leave parameters without gradients, which
+        # DDP must be told about; non-reentrant checkpointing is the variant DDP accepts with that; the slow
+        # rank-0 decoded eval must not trip the collective timeout. One process: none of this applies.
+        **(
+            {
+                "ddp_find_unused_parameters": True,
+                "ddp_timeout": 7200,
+                "gradient_checkpointing_kwargs": {"use_reentrant": False},
+            }
+            if WORLD_SIZE > 1
+            else {}
+        ),
         # Trainer guesses label names from forward's parameters: ``s2_labels`` matches too, so a
         # single-stream run (no s2_labels in the batch) would collect no eval loss or metrics.
         label_names=["labels"],
@@ -2758,6 +2989,8 @@ def main():
     optimizers = (None, None)
     if args.freeze_encoder_steps:
         callbacks.append(HeadWarmup(model, args.freeze_encoder_steps))
+    if args.decoder_margin_weight and (args.decoder_margin_start_step or args.decoder_margin_ramp_steps):
+        callbacks.append(DecoderMarginRamp(model, args.decoder_margin_start_step, args.decoder_margin_ramp_steps))
     if args.guard_grad_norm > 0:
         callbacks.append(
             DivergenceGuard(args.guard_grad_norm, args.guard_patience, args.guard_eval_rise, args.guard_eval_metric)
@@ -2948,6 +3181,23 @@ def main():
             if args.edge_loss_weight > 0
             else {}
         ),
+        **(
+            {
+                "decoder_margin": {
+                    "weight": args.decoder_margin_weight,
+                    "scale": args.decoder_margin_scale,
+                    "tolerance_frames": args.decoder_margin_tolerance_frames,
+                    "cap_frames": args.decoder_margin_cap_frames,
+                    "start_step": args.decoder_margin_start_step,
+                    "ramp_steps": args.decoder_margin_ramp_steps,
+                    "activity": args.decoder_margin_activity,
+                    "gap_cost": args.decoder_margin_gap_cost,
+                    "bonus": args.decoder_margin_bonus,
+                }
+            }
+            if args.decoder_margin_weight > 0
+            else {}
+        ),
         **({"fusion": config.fusion} if args.fusion == "muq" else {}),
         # Only a non-MMS backbone records its clock, so earlier identity files stay resumable.
         **(
@@ -3007,7 +3257,8 @@ def main():
     trainer.window_history = [(h["from_step"], h["windows_per_step"]) for h in identity.get("schedule_history", [])]
     if not args.resume and get_last_checkpoint(str(args.output)):
         raise ValueError("Output already contains checkpoints; use --resume or a new directory")
-    identity_path.write_text(json.dumps(identity, indent=2) + "\n")
+    if train_args.process_index == 0:
+        identity_path.write_text(json.dumps(identity, indent=2) + "\n")
     trainer.train(resume_from_checkpoint=resume)
     trainer.save_model()
     processor.save_pretrained(args.output)
