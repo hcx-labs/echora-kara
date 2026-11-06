@@ -68,6 +68,30 @@ class TextAlignerConfig:
         return asdict(self)
 
 
+# The head adds an absolute sinusoidal position to every frame and is trained on 20-27 s windows. Past
+# that length it has never seen the positions and its output degrades (on a 45 s window it named the
+# sung line on 61 % of a song's frames, against 87 % at 25 s). Always run it in windows this long.
+TRAINING_WINDOW_FRAMES = 1250  # 25 s at 20 ms
+WINDOW_OVERLAP_FRAMES = 250
+
+
+def frame_windows(
+    frames: int, window: int = TRAINING_WINDOW_FRAMES, overlap: int = WINDOW_OVERLAP_FRAMES
+) -> list[tuple[slice, slice]]:
+    """Windows of at most ``window`` frames covering ``frames``, neighbours sharing ``overlap``:
+    ``[(piece, keep), ...]`` with ``piece`` the slice to run and ``keep`` the slice of its output to
+    use (half the overlap on each side), so the kept parts concatenate to exactly ``frames``."""
+    step = window - overlap
+    starts = list(range(0, max(1, frames - overlap), step)) or [0]
+    windows = []
+    for index, start in enumerate(starts):
+        stop = min(frames, start + window)
+        left = overlap // 2 if index else 0
+        right = overlap - overlap // 2 if index + 1 < len(starts) else 0
+        windows.append((slice(start, stop), slice(left, stop - start - right)))
+    return windows
+
+
 def sinusoid(positions: torch.Tensor, dim: int) -> torch.Tensor:
     """Sinusoidal encoding of ``positions`` (any shape) -> (..., dim): sines then cosines of ``dim // 2``
     frequencies."""

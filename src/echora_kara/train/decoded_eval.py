@@ -120,18 +120,24 @@ class DecodedEval:
             token = None
             if text is not None:
                 hidden = captured["hidden"].float()
-                padding = torch.zeros(hidden.shape[:2], dtype=torch.bool, device=device)
-                part = head.forward_parts(
-                    hidden,
-                    padding,
-                    text["letters"],
-                    text["voice"],
-                    text["text_padding"],
-                    letter[None],
-                    text["line"],
-                    text["position"],
-                )[ta.LEAD]
-                token = part["token"][0] if "token" in part else torch.log_softmax(part["combined"][0][:, 1:], -1)
+                # The head only knows frame positions inside a training-length window (ta.frame_windows).
+                pieces = []
+                for window, keep in ta.frame_windows(hidden.shape[1]):
+                    h = hidden[:, window]
+                    padding = torch.zeros(h.shape[:2], dtype=torch.bool, device=device)
+                    part = head.forward_parts(
+                        h,
+                        padding,
+                        text["letters"],
+                        text["voice"],
+                        text["text_padding"],
+                        letter[None][:, window],
+                        text["line"],
+                        text["position"],
+                    )[ta.LEAD]
+                    found = part["token"][0] if "token" in part else torch.log_softmax(part["combined"][0][:, 1:], -1)
+                    pieces.append(found[keep])
+                token = torch.cat(pieces)
             bg = getattr(out, "background_logits", None)
             bg = (1 - torch.softmax(bg[0].float(), -1)[:, BLANK]) if bg is not None else None
             frames = round(letter.shape[0] * overlap / max(1, len(piece)))

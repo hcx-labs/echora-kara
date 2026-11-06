@@ -358,16 +358,24 @@ class Wav2Vec2ForcedAligner(ForcedAligner):
         frame_shift_seconds = duration_seconds / emission.shape[0]
         return emission, target_sample_rate, frame_shift_seconds
 
-    def text_token_share(self, emission, token_letters, voices, lines, window=2250, overlap=100):
+    def text_token_share(self, emission, token_letters, voices, lines, window=None, overlap=None):
         """Text-conditioned head: log P(token | singing) of the LEAD tokens [frames, lead tokens] over the last inference.
 
         The head reads the stitched fused frame embeddings (``last_hidden``) and the encoder's letter
         log-probabilities (``emission``) in windows of ``window`` frames sharing ``overlap`` (half kept on
-        each side) and the whole song's tokens: ``token_letters`` (letter ids per token, text order),
-        ``voices`` (0 lead / 1 backing) and ``lines`` (line index per token)."""
-        from echora_kara.model.text_aligner import collate_text
+        each side; defaults: ``text_aligner.frame_windows``, the length the head was trained on) and the
+        whole song's tokens: ``token_letters`` (letter ids per token, text order), ``voices`` (0 lead /
+        1 backing) and ``lines`` (line index per token)."""
+        from echora_kara.model.text_aligner import (
+            TRAINING_WINDOW_FRAMES,
+            WINDOW_OVERLAP_FRAMES,
+            collate_text,
+            frame_windows,
+        )
         from echora_kara.model.song_text import lyric_tokens, text_features
 
+        window = TRAINING_WINDOW_FRAMES if window is None else window
+        overlap = WINDOW_OVERLAP_FRAMES if overlap is None else overlap
         head = self.text_aligner
         version = getattr(self.model.config, "song_text_version", 1)
         tokens = lyric_tokens(token_letters, voices, lines, version)
@@ -381,12 +389,9 @@ class Wav2Vec2ForcedAligner(ForcedAligner):
         if hidden is None or hidden.shape[0] != frames:
             raise RuntimeError("text-aligner head: stitched embeddings do not match the emission lattice")
         lead_columns = torch.tensor([j for j, v in enumerate(voices) if v == 0], device=self.device)
-        step = window - overlap
-        starts = list(range(0, max(1, frames - overlap), step)) or [0]
         parts = []
         with torch.inference_mode():
-            for index, start in enumerate(starts):
-                piece = slice(start, min(frames, start + window))
+            for piece, keep in frame_windows(frames, window, overlap):
                 h = hidden[piece].to(self.device)[None]
                 letters = emission[piece].to(self.device, torch.float32)[None]
                 padding = torch.zeros(h.shape[:2], dtype=torch.bool, device=self.device)
@@ -404,10 +409,7 @@ class Wav2Vec2ForcedAligner(ForcedAligner):
                     share = out["token"][0][:, lead_columns]
                 else:  # an unfactorized head: its lead columns renormalised without "none"
                     share = torch.log_softmax(out["combined"][0][:, 1:][:, lead_columns], -1)
-                n = share.shape[0]
-                left = overlap // 2 if index else 0
-                right = overlap - overlap // 2 if index + 1 < len(starts) else 0
-                parts.append(share[left : n - right if right else None].float().cpu())
+                parts.append(share[keep].float().cpu())
         result = torch.cat(parts)
         if result.shape[0] != frames:
             raise RuntimeError("text-aligner head: stitched output does not match the emission lattice")

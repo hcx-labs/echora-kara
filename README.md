@@ -49,7 +49,8 @@ flowchart LR
    German and French are spelled by sound. Other scripts are romanised by reading (see [Labels](#labels)).
 2. **Compute frame posteriors.** The encoder turns 16 kHz audio into 20 ms frames, in 45 s chunks with
    shared context that are stitched on an exact frame clock. MuQ features are fused into every frame, and
-   each head produces its own per-frame output.
+   each head produces its own per-frame output. The text head reads the stitched frames in 25 s windows,
+   the length it is trained on.
 3. **Decode the whole song at once.** The engine runs one constrained Viterbi alignment of all lyric
    units against the full song's posteriors. It penalises frames without vocal activity, discourages
    gaps inside a line, enforces paced minimum durations, and adds the text head's per-frame evidence as a
@@ -110,6 +111,40 @@ A model must be run with the rule set it was trained on, and checkpoints record 
 - **Evaluation**: besides frame metrics, each evaluation decodes held-out songs end to end with the
   production decoder and reports word-start error (median, mean, share over 500 ms).
 
+## Benchmark
+
+Word-start error on [JamendoLyrics MultiLang](https://github.com/f90/jamendolyrics): 79 songs and 21,580
+words in English, German, Spanish and French. Songs are aligned on the original mix, with no vocal
+separation, and every word's predicted start is compared with the reference start.
+
+| Metric | With the text head (bonus 0.4) | Acoustic heads only |
+|---|---|---|
+| Median error | **38.8 ms** | 40.2 ms |
+| Mean error | **113.7 ms** | 195.4 ms |
+| Words within 50 ms | **61.0 %** | 59.4 % |
+| Words within 300 ms | **96.9 %** | 95.9 % |
+| Words off by more than 500 ms | **2.4 %** (525) | 3.3 % (710) |
+| Per-song average, words within 300 ms | **96.4 %** | 95.2 % |
+| Per-song average, absolute error | **0.133 s** | 0.229 s |
+
+The last two rows average each song's score over the 79 songs, as the JamendoLyrics benchmark does.
+
+By language, with the text head:
+
+| Language | Songs | Words | Median | Mean | Within 50 ms | Within 300 ms | Over 500 ms |
+|---|---|---|---|---|---|---|---|
+| German | 20 | 5,157 | 29.4 ms | 54.7 ms | 72.7 % | 98.8 % | 0.9 % |
+| English | 20 | 5,693 | 37.3 ms | 119.2 ms | 62.0 % | 95.9 % | 3.1 % |
+| Spanish | 20 | 5,269 | 35.9 ms | 96.8 ms | 65.1 % | 98.2 % | 1.4 % |
+| French | 19 | 5,461 | 56.1 ms | 180.0 ms | 44.8 % | 94.7 % | 4.1 % |
+
+Setup: the checkpoint at step 74,000 of the single-schedule 100k-step run
+([`scripts/train_clean100k_dm.sh`](scripts/train_clean100k_dm.sh) without its three `--decoder-margin-*`
+flags), which is the best checkpoint on the 40-song decoded evaluation. Labels are `v3-sung`. The decoder
+uses the recommended settings from [Align a song](#align-a-song): exact frame clock, no timing offset,
+vocal-activity penalty, paced minimum durations, blank-free units and an in-line gap cost of 0.2. The text
+bonus weight was picked on five of the 79 songs, so the figures are lightly tuned to this set.
+
 ## Repository layout
 
 ```
@@ -163,7 +198,7 @@ with per-token times and diagnostics. These flags are the recommended decoder se
 | `--exact_frame_clock` | time each frame at its true receptive-field centre |
 | `--min_token_ms`, `--min_letter_ms`, `--duration_pace_ratio` | minimum unit and letter durations, scaled to each line's pace |
 | `--vocal_activity_weight` | extra cost for letters placed where the audio is quiet |
-| `ECHORA_KARA_TEXT_BONUS=0.3` | weight of the text head's per-frame evidence in the decode |
+| `ECHORA_KARA_TEXT_BONUS=0.4` | weight of the text head's per-frame evidence in the decode |
 | `ECHORA_KARA_IN_LINE_GAP_COST=0.2` | cost for opening a gap inside a line |
 | `ECHORA_KARA_LID_MODEL` | path to fastText `lid.176.ftz` (default: `resources/lid.176.ftz`) |
 
