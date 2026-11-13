@@ -216,3 +216,45 @@ def test_vocable_vowels_follow_the_vowel_the_model_hears(monkeypatch):
     off = al.align_audio_with_timeline(audio, [["ba", "uu"]], sr=16000, hf_model_id="fake")
     # Without the merged column the unit has no evidence anywhere.
     assert on[1]["score"] > 0.5 > 0.01 > off[1]["score"]
+
+
+def test_cli_keeps_opening_backing_on_the_lead_and_marks_inline_backing(tmp_path, monkeypatch):
+    import json
+
+    import soundfile as sf
+
+    from echora_kara.inference import cli
+
+    emission = lattice(
+        200,
+        {
+            (2, 4): "l",
+            (4, 8): "a",
+            (10, 12): "l",
+            (12, 16): "a",
+            (30, 34): "b",
+            (34, 40): "a",
+            (50, 54): "d",
+            (54, 60): "i",
+            (64, 68): "n",
+            (68, 72): "o",
+            (120, 124): "k",
+            (124, 130): "a",
+        },
+    )
+    background = lattice(200, {(48, 53): "n", (53, 58): "o"})
+    fake = FakeAligner(emission, background)
+    monkeypatch.setattr(al, "_wav2vec_aligner", lambda *args, **kwargs: fake)
+    (tmp_path / "i.txt").write_text("(la la)\nba di (no)\nka\n", encoding="utf-8")
+    sf.write(tmp_path / "i.wav", np.zeros(200 * 320, dtype=np.float32), 16000)
+    cli.main(
+        ["--path_io", str(tmp_path), "--input_audio", "i.wav", "--hf_model_path", "fake", "--no-gpu"]
+        + ["--blank_free_tokens", "--background_decoding", "--inline_backing", "--inline_backing_anchor", "1"]
+    )
+    document = json.loads((tmp_path / "o.alignment.json").read_text(encoding="utf-8"))
+    lines = document["alignment"]["lines"]
+    assert lines[0]["voice"] == "background"  # an opening backing line, aligned on the lead path
+    assert lines[0]["start_ms"] < lines[1]["start_ms"]
+    assert [token.get("stream") for token in lines[1]["tokens"]] == [None, None, 2]
+    assert document["diagnostics"]["opening_backing_lines_on_lead"] == 1
+    assert document["diagnostics"]["inline_backing_moved_groups"] == 1

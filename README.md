@@ -55,7 +55,8 @@ flowchart LR
    units against the full song's posteriors. It penalises frames without vocal activity, discourages
    gaps inside a line, enforces paced minimum durations, and adds the text head's per-frame evidence as a
    bonus. Lines that are entirely backing vocals are decoded separately on the background head, so they
-   can overlap the lead.
+   can overlap the lead; bracketed backing words inside a lead line are re-placed there too, as a second
+   stream.
 4. **Write timings.** Unit boundaries become line, word and syllable times, exported as ASS (karaoke
    `\k` tags), enhanced LRC and a JSON alignment document.
 
@@ -175,7 +176,7 @@ export ECHORA_KARA_LID_MODEL=$PWD/resources/lid.176.ftz
 ### Align a song
 
 Put the lyrics in a text file, one sung line per line. Lines entirely in brackets, such as `(so lonely)`,
-are treated as backing vocals. Then run:
+are treated as backing vocals, and so are bracketed words inside a line, such as `la la (la la)`. Then run:
 
 ```sh
 mkdir work && cp lyrics.txt work/i.txt
@@ -183,7 +184,7 @@ echora-kara-align --path_io work --input_audio /music/song.flac --input_text i.t
   --model yohane --hf_model_path /models/echora-kara --fusion on --label_rules v3-sung --lang auto \
   --head_correct 0 --tail_correct 0 --timing_offset_ms 0 \
   --min_token_ms 100 --min_letter_ms 40 --duration_pace_ratio 0.9 --vocal_activity_weight 2.0 \
-  --exact_frame_clock --blank_free_tokens --background_decoding
+  --exact_frame_clock --blank_free_tokens --background_decoding --inline_backing
 ```
 
 This writes `work/o.ass`, `work/o_ruby.lrc` and `work/o.alignment.json`, the full alignment document
@@ -195,13 +196,29 @@ with per-token times and diagnostics. These flags are the recommended decoder se
 | `--label_rules` | must match the rules the checkpoint was trained with |
 | `--detect_language en,de,fr,...` | with `--lang auto`, identify the lyrics' language from their lines (fastText) among the listed ones; without a language, Latin words are spelled letter by letter, which a model trained on pronunciation labels follows poorly. The result is recorded as `normalization_language_source` |
 | `--blank_free_tokens` | no blank frames inside a unit, as in training, so held notes stay on their word |
-| `--background_decoding` | decode whole backing-vocal lines on the background head, allowing overlap with the lead |
+| `--background_decoding` | decode whole backing-vocal lines on the background head, allowing overlap with the lead. Backing lines before the first lead line are sung alone and stay on the lead path (`ECHORA_KARA_OPENING_BACKING_ON_LEAD=0` sends them to the background head too); they are still marked as backing lines |
+| `--inline_backing` | re-place bracketed words inside a lead line on the background head, in a window opening `--inline_backing_anchor` (default 3) lead words before them; they are marked `"stream": 2` and may overlap the lead |
 | `--exact_frame_clock` | time each frame at its true receptive-field centre |
 | `--min_token_ms`, `--min_letter_ms`, `--duration_pace_ratio` | minimum unit and letter durations, scaled to each line's pace |
 | `--vocal_activity_weight` | extra cost for letters placed where the audio is quiet |
 | `ECHORA_KARA_TEXT_BONUS=0.4` | weight of the text head's per-frame evidence in the decode |
-| `ECHORA_KARA_IN_LINE_GAP_COST=0.2` | cost for opening a gap inside a line |
+| `ECHORA_KARA_IN_LINE_GAP_COST=0.2` | cost per frame of a gap inside a line |
 | `ECHORA_KARA_LID_MODEL` | path to fastText `lid.176.ftz` (default: `resources/lid.176.ftz`) |
+
+Other decoder switches, with their defaults:
+
+| Flag / variable | Effect |
+|---|---|
+| `--gap_onset_pull` | off; after at least 0.6 s of silence, pull a word the path starts 0.6–1.5 s late back to the first frame with vocal energy (a lone sustained vowel the model barely hears) |
+| `ECHORA_KARA_IN_LINE_GAP_CAP=1` | the most one in-line gap may cost in total, so a real pause inside a line is kept; `ECHORA_KARA_IN_LINE_GAP_FREE_COST=0.02` is the per-frame cost past it. `0` keeps the gap cost linear |
+| `ECHORA_KARA_VOCABLE_VOWELS=1` | score a unit spelled only with `o`/`u` (oh, ooh) on whichever of the two the model hears; `0` turns it off |
+| `ECHORA_KARA_LINE_END_EXTEND_S=1.2` | extend a line's last word while one of its letters still outscores blank, up to this many seconds and never into the next lead word; `0` turns it off |
+
+Opt-in experiments, all off: `ECHORA_KARA_EMISSION_FLOOR`, `ECHORA_KARA_VOWEL_SIBLINGS`,
+`ECHORA_KARA_TEXT_SHARE_NORM=peak`, `ECHORA_KARA_LINE_FIRST_OFFSET_MS`, `ECHORA_KARA_BACKGROUND_LEAD_IN_ORDER`,
+`ECHORA_KARA_BACKGROUND_FALLBACK_SCORE` and `ECHORA_KARA_CRAMMED_BACKGROUND_MS` (see the docstring of
+`align_audio_with_timeline` and the comments in `inference/cli.py`). Each run records its decoder settings in the diagnostics of
+`o.alignment.json`.
 
 `echora-kara-align --help` lists every option. `python -m echora_kara.inference.worker` runs the same
 pipeline as a long-lived JSON-lines worker, so a host application can keep the model loaded.
