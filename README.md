@@ -193,6 +193,7 @@ with per-token times and diagnostics. These flags are the recommended decoder se
 |---|---|
 | `--fusion on` | load the MuQ branch for checkpoints trained with it; `gate0` runs the same checkpoint without MuQ, for ablation |
 | `--label_rules` | must match the rules the checkpoint was trained with |
+| `--detect_language en,de,fr,...` | with `--lang auto`, identify the lyrics' language from their lines (fastText) among the listed ones; without a language, Latin words are spelled letter by letter, which a model trained on pronunciation labels follows poorly. The result is recorded as `normalization_language_source` |
 | `--blank_free_tokens` | no blank frames inside a unit, as in training, so held notes stay on their word |
 | `--background_decoding` | decode whole backing-vocal lines on the background head, allowing overlap with the lead |
 | `--exact_frame_clock` | time each frame at its true receptive-field centre |
