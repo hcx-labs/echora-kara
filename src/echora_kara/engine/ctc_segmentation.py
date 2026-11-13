@@ -199,6 +199,8 @@ def align_with_minimum_durations(
     blank_free_tokens: bool = False,
     line_ranges: list[tuple[int, int]] | None = None,
     in_line_gap_cost: float = 0.0,
+    in_line_gap_cap: float = 0.0,
+    in_line_gap_free_cost: float = 0.0,
 ) -> list[list[TokenSpan]]:
     """Global CTC Viterbi where target i occupies at least ``minimum_frames[i]`` frames.
 
@@ -222,7 +224,13 @@ def align_with_minimum_durations(
     ``in_line_gap_cost`` (opt-in, with ``line_ranges`` over token groups) charges that much per blank
     frame between two tokens of the same line; blanks before a line's first token stay free. Reference
     word timings put 95 % of in-line gaps at zero, so a long instrumental pause lands between lines
-    rather than inside one ("See the sunset | And I'm gonna stay", not "... And | I'm gonna ...").
+    rather than inside one (a pause falls after a line's last word, not after its first).
+
+    ``in_line_gap_cap`` (0: off, the default; it only acts when larger than ``in_line_gap_cost``) bounds what one
+    in-line gap can cost in total: the gap's blank becomes a charged blank followed by a free one that costs the rest
+    of the cap to enter, so a real pause inside a line ("ooh, [0.7 s] ooh") is not squeezed shut by a cost that grows
+    without limit. ``in_line_gap_free_cost`` still charges that much per frame on the free blank, so a word cannot
+    jump seconds ahead to the next phrase for the fixed cap. With the cap off the cost stays linear.
     """
     # Emission columns can be unique pseudo-labels; CTC repetition uses acoustic identity.
     acoustic_groups = token_groups if acoustic_token_groups is None else acoustic_token_groups
@@ -242,6 +250,8 @@ def align_with_minimum_durations(
             for g in range(start, end - 1):
                 in_line_after.add(sum(len(group) for group in token_groups[: g + 1]) - 1)
     in_line_blank = [False]
+    capped = in_line_gap_cap > in_line_gap_cost > 0
+    free_blanks: list[int] = []  # states of the free blank after each charged in-line blank
     labels = [blank]
     kinds = [0]  # 0 blank, 1 first sub-state, 2 inner, 3 last, 4 first and last
     owners = [-1]
@@ -259,6 +269,14 @@ def align_with_minimum_durations(
         owners.append(-1)
         entries.append(False)
         in_line_blank.append(index in in_line_after)
+        if capped and index in in_line_after:
+            # The free blank after the charged one; entering it costs the rest of the cap.
+            labels.append(blank)
+            kinds.append(0)
+            owners.append(-1)
+            entries.append(False)
+            in_line_blank.append(False)
+            free_blanks.append(len(labels) - 1)
     if emission.shape[0] < sum(minimum_frames):
         raise RuntimeError("CTC emission has fewer frames than the minimum durations need")
     device = emission.device
@@ -266,6 +284,7 @@ def align_with_minimum_durations(
     state_kinds = torch.tensor(kinds, device=device)
     can_stay = (state_kinds == 0) | (state_kinds == 3) | (state_kinds == 4)
     can_skip = torch.zeros(len(labels), dtype=torch.bool, device=device)
+    can_skip_gap = torch.zeros(len(labels), dtype=torch.bool, device=device)  # letter over both capped blanks
     for state, kind in enumerate(kinds):
         if (
             kind in (1, 4)
@@ -275,6 +294,12 @@ def align_with_minimum_durations(
             and acoustic_targets[owners[state - 2]] != acoustic_targets[owners[state]]
         ):
             can_skip[state] = True
+        if kind in (1, 4) and state >= 3 and kinds[state - 1] == 0 and kinds[state - 2] == 0:
+            # After a capped in-line gap (charged blank, free blank) the charged blank may step over the free one,
+            # and the previous letter over both, unless the two letters repeat one label (CTC needs a blank).
+            can_skip[state] = True
+            if kinds[state - 3] in (3, 4) and acoustic_targets[owners[state - 3]] != acoustic_targets[owners[state]]:
+                can_skip_gap[state] = True
     use_edges = edge_logits is not None and edge_weight > 0
     if use_edges:
         if edge_logits.shape[0] != emission.shape[0]:
@@ -290,6 +315,13 @@ def align_with_minimum_durations(
         for kind in kinds:
             flags.append(next(flag_iter) if kind == 0 else False)
         gap_penalty = torch.tensor(flags, device=device, dtype=emission.dtype) * in_line_gap_cost
+        if free_blanks and in_line_gap_free_cost > 0:
+            gap_penalty[free_blanks] = in_line_gap_free_cost
+    advance_cost = None
+    if free_blanks:
+        advance_cost = torch.zeros(len(labels), device=device, dtype=emission.dtype)
+        advance_cost[free_blanks] = in_line_gap_cap - in_line_gap_cost
+    use_gap_skips = bool(can_skip_gap.any())
     scores = torch.full((len(labels),), float("-inf"), device=device)
     scores[0] = emission[0, blank]
     scores[1] = emission[0, labels[1]]
@@ -300,13 +332,17 @@ def align_with_minimum_durations(
     for frame in range(1, emission.shape[0]):
         stay = torch.where(can_stay, scores, negative_inf)
         advance = torch.cat((negative_inf.reshape(1), scores[:-1]))
+        if advance_cost is not None:
+            advance = advance - advance_cost
         skip = torch.where(can_skip, torch.cat((negative_inf.repeat(2), scores[:-2])), negative_inf)
+        # Move k comes from state - k, so the backtrace below needs no table.
+        moves = [stay, advance, skip]
+        if use_gap_skips:
+            moves.append(torch.where(can_skip_gap, torch.cat((negative_inf.repeat(3), scores[:-3])), negative_inf))
         if use_edges:
             entering = torch.where(entry_states, log_edge[frame], log_no_edge[frame])
-            stay = stay + log_no_edge[frame]
-            advance = advance + entering
-            skip = skip + entering
-        best_scores, best_moves = torch.stack((stay, advance, skip)).max(dim=0)
+            moves = [moves[0] + log_no_edge[frame], *(move + entering for move in moves[1:])]
+        best_scores, best_moves = torch.stack(moves).max(dim=0)
         scores = best_scores + emission[frame].index_select(0, state_labels)
         if gap_penalty is not None:
             scores = scores - gap_penalty

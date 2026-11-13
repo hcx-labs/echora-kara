@@ -148,6 +148,13 @@ def main(argv=None):
     parser.add_argument("--bpb", type=int, default=3, help="Number of symbols in the countdown indicator")
     parser.add_argument("--lang", default="auto", help="Lyrics language")
     parser.add_argument(
+        "--detect_language",
+        default=None,
+        help="With --lang auto: comma-separated languages the lyrics may be identified as from their lines "
+        "(label_rules.lyrics_language, fastText lid.176.ftz). Lyrics without a language otherwise take the "
+        "generic path, which spells Latin words letter by letter",
+    )
+    parser.add_argument(
         "--label_rules",
         choices=("v1", "v2", "v2-orthographic", "v3", "v3-orthographic", "v3-sung"),
         default="v1",
@@ -197,6 +204,24 @@ def main(argv=None):
         "--background_decoding",
         action="store_true",
         help="Decode whole bracketed lines on the checkpoint's background head (may overlap the lead)",
+    )
+    parser.add_argument(
+        "--inline_backing",
+        action="store_true",
+        help="Inline bracketed words (a backing phrase inside a lead line) stay on the lead path for ordering, "
+        "then are re-placed on the background head inside their line's window, free to overlap the lead",
+    )
+    parser.add_argument(
+        "--inline_backing_anchor",
+        type=int,
+        default=3,
+        help="With --inline_backing: a bracketed run's window opens this many lead words before the run",
+    )
+    parser.add_argument(
+        "--gap_onset_pull",
+        action="store_true",
+        help="After at least 0.6 s of silence, pull a word the path starts 0.6 to 1.5 s late back to the first "
+        "frame with vocal energy (a lone sustained vowel the model barely hears)",
     )
     parser.add_argument(
         "--blank_free_tokens",
@@ -309,6 +334,21 @@ def main(argv=None):
         lines = lrcfmt.utat_process(file.read()) if txt_format == "uta" else list(file)
     if txt_format == "moe":
         lines = [lrcfmt.moeg_process_line(line) for line in lines]
+    language_source = "given"
+    if args.detect_language and lrc_language == "auto":
+        from echora_kara.text import label_rules
+
+        language_source = "undetected"
+        try:
+            detected = label_rules.lyrics_language(
+                [str(line) for line in lines], frozenset(args.detect_language.split(",")) - {"auto"}
+            )
+        except RuntimeError as error:  # no lid.176.ftz or fasttext: keep the generic path
+            print(f"Language detection unavailable: {error}")
+            detected = None
+        if detected:
+            lrc_language, language_source = detected, "detected"
+            print(f"Lyrics given without a language; identified as {detected}")
     result_list, source_texts = normalize_source_lines(
         lines, lrc_language, sokuon_split, hatsuon_split, args.label_rules
     )
@@ -321,13 +361,20 @@ def main(argv=None):
     alignment_tokens = []
     alignment_token_lines = [[]]
     token_to_index_map = {}
+    bracketed = []  # per acoustic token: inside a bracket of its line
+    depth = 0
     for i, item in enumerate(result_list):
         if item.get("orig") == "\n":
             alignment_token_lines.append([])
+            depth = 0
         elif "pron" in item and item["pron"]:
             alignment_tokens.append(item["pron"])
             alignment_token_lines[-1].append(item["pron"])
             token_to_index_map[len(alignment_tokens) - 1] = i
+            bracketed.append(depth > 0)
+        else:
+            for char in str(item.get("orig") or ""):
+                depth = depth + 1 if char in "(（" else max(0, depth - 1) if char in ")）" else depth
     if alignment_token_lines and not alignment_token_lines[-1]:
         alignment_token_lines.pop()
 
@@ -380,6 +427,7 @@ def main(argv=None):
 
     y_processed = time_stretch_audio(audio_file, audio_speed)
     print("Aligning...")
+    opening_backing_lines = set()  # source line indexes of backing lines kept on the lead path
     if fa_model_select == "yohane_hf":
         # One global CTC pass over the whole song, from the audio alone; the lyric lines
         # give line ranges and each line's pace.
@@ -394,29 +442,80 @@ def main(argv=None):
                 for i, tokens in enumerate(alignment_token_lines)
                 if tokens
             ]
-        alignment_results = align_audio_with_timeline(
-            y_processed,
-            [tokens for tokens in alignment_token_lines if tokens],
-            sr=sr,
-            speed=audio_speed,
-            use_gpu=align_use_gpu,
-            hf_model_id=hf_model_path,
-            min_letter_ms=args.min_letter_ms,
-            min_token_ms=args.min_token_ms,
-            timing_offset_ms=args.timing_offset_ms,
-            duration_pace_ratio=args.duration_pace_ratio,
-            vocal_activity_weight=args.vocal_activity_weight,
-            exact_frame_clock=args.exact_frame_clock,
-            subframe_refinement=args.subframe_refinement,
-            onset_offsets_ms=json.loads(args.onset_offsets) if args.onset_offsets else None,
-            edge_weight=args.edge_weight,
-            vocal_activity_source=args.vocal_activity_source,
-            vocal_activity_file=args.vocal_activity_file,
-            blank_free_tokens=args.blank_free_tokens,
-            background_lines=background_lines,
-            fusion=args.fusion,
-            fusion_model=args.fusion_model,
-        )
+            # Backing lines written before the first lead line are sung alone, so the lead head hears them and the
+            # background head may not (a vocable over an intro): on the background head they were squeezed against
+            # the first lead line, whose first word took the intro instead. Keep them on the lead path, in order;
+            # they stay backing lines in the output. ECHORA_KARA_OPENING_BACKING_ON_LEAD=0 puts them back on the
+            # background head.
+            if os.environ.get("ECHORA_KARA_OPENING_BACKING_ON_LEAD", "1") == "1" and not all(background_lines):
+                with_tokens = [i for i, tokens in enumerate(alignment_token_lines) if tokens]
+                for position, flag in enumerate(background_lines):
+                    if not flag:
+                        break
+                    background_lines[position] = False
+                    opening_backing_lines.add(with_tokens[position])
+        inline_backing_tokens = None
+        if args.inline_backing:
+            # A line needs a lead word for its brackets to be inline ("(oh) (yeah)" alone is kept whole).
+            inline_backing_tokens, cursor = [], 0
+            for tokens in alignment_token_lines:
+                flags = bracketed[cursor : cursor + len(tokens)]
+                inline_backing_tokens.extend(flag and not all(flags) for flag in flags)
+                cursor += len(tokens)
+
+        def run_alignment(background_lines):
+            return align_audio_with_timeline(
+                y_processed,
+                [tokens for tokens in alignment_token_lines if tokens],
+                sr=sr,
+                speed=audio_speed,
+                use_gpu=align_use_gpu,
+                hf_model_id=hf_model_path,
+                min_letter_ms=args.min_letter_ms,
+                min_token_ms=args.min_token_ms,
+                timing_offset_ms=args.timing_offset_ms,
+                duration_pace_ratio=args.duration_pace_ratio,
+                vocal_activity_weight=args.vocal_activity_weight,
+                exact_frame_clock=args.exact_frame_clock,
+                subframe_refinement=args.subframe_refinement,
+                onset_offsets_ms=json.loads(args.onset_offsets) if args.onset_offsets else None,
+                edge_weight=args.edge_weight,
+                vocal_activity_source=args.vocal_activity_source,
+                vocal_activity_file=args.vocal_activity_file,
+                blank_free_tokens=args.blank_free_tokens,
+                background_lines=background_lines,
+                inline_backing_tokens=inline_backing_tokens,
+                inline_backing_anchor_words=args.inline_backing_anchor,
+                gap_onset_pull=args.gap_onset_pull,
+                fusion=args.fusion,
+                fusion_model=args.fusion_model,
+            )
+
+        alignment_results = run_alignment(background_lines)
+        # Opt-in experiment, off by default (ECHORA_KARA_CRAMMED_BACKGROUND_MS=120 turns it on): a lead line the
+        # path could only fit by cramming its words (mean word shorter than the threshold) is taken for a chant
+        # sung under the lead and decoded again as a background line, free to overlap its neighbours. Fast rap is
+        # naturally that quick, so the rule pulled real lead lines out of order and showed two lead lines at once.
+        crammed_ms = float(os.environ.get("ECHORA_KARA_CRAMMED_BACKGROUND_MS", "0"))
+        if crammed_ms > 0 and args.background_decoding:
+            flags = list(background_lines or [False] * sum(1 for t in alignment_token_lines if t))
+            sizes = [len(tokens) for tokens in alignment_token_lines if tokens]
+            cursor, crammed = 0, []
+            for index, size in enumerate(sizes):
+                words = alignment_results[cursor : cursor + size]
+                cursor += size
+                mean_ms = (
+                    1000
+                    * sum(float(w.get("original_end", 0)) - float(w.get("original_start", 0)) for w in words)
+                    / max(1, size)
+                )
+                if not flags[index] and size >= 4 and mean_ms < crammed_ms:
+                    crammed.append(index)
+            if crammed and len(crammed) + sum(flags) < len(flags):
+                for index in crammed:
+                    flags[index] = True
+                print(f"Re-aligning {len(crammed)} crammed line(s) as background: {crammed}")
+                alignment_results = run_alignment(flags)
     else:
         alignment_results = align_func(
             y_processed, alignment_tokens, non_silent_ranges, sr, audio_speed, use_gpu=align_use_gpu
@@ -457,9 +556,11 @@ def main(argv=None):
                         * 1000
                     ),
                     "ctc_score": float(original_item["alignment_score"]),
+                    # Inline backing words re-placed on their own stream (--inline_backing) may overlap the lead.
+                    **({"stream": 2} if alignment_results[alignment_index].get("stream") == 2 else {}),
                 }
             )
-        line_is_background = any(
+        line_is_background = line_index in opening_backing_lines or any(
             alignment_results[token_offset + i].get("voice") == "background" for i in range(len(line_tokens))
         )
         token_offset += len(line_tokens)
@@ -471,8 +572,9 @@ def main(argv=None):
                     lambda match: match.group(1) if match.group(1) is not None else match.group(2),
                     str(source_texts[line_index]),
                 ),
-                "start_ms": token_records[0]["start_ms"] if token_records else None,
-                "end_ms": token_records[-1]["end_ms"] if token_records else None,
+                # Second-stream words may start before the first lead word or end after the last one.
+                "start_ms": min(t["start_ms"] for t in token_records) if token_records else None,
+                "end_ms": max(t["end_ms"] for t in token_records) if token_records else None,
                 "tokens": token_records,
                 **({"voice": "background"} if line_is_background else {}),
             }
@@ -506,6 +608,8 @@ def main(argv=None):
             "model_path": hf_model_path or "torchaudio.pipelines.MMS_FA",
             "device": "cuda" if align_use_gpu and __import__("torch").cuda.is_available() else "cpu",
             "normalization_language": lrc_language,
+            "normalization_language_source": language_source,
+            "opening_backing_lines_on_lead": len(opening_backing_lines),
             "audio_source": "input_audio",
             "inference_config": vars(args),
         },
