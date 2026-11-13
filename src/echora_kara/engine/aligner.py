@@ -571,6 +571,9 @@ def _span_result(token, spans, frame_duration, offset=0.0, frame_times=None, fra
     else:
         start = offset + _frame_time(frame_times, spans[0].start, frame_duration) + fraction * frame_duration
         end = offset + _frame_time(frame_times, spans[-1].end, frame_duration)
+    # A negative calibration offset must not move a word before the song starts.
+    start = max(0.0, start)
+    end = max(start, end)
     score = sum(float(span.score) for span in spans) / len(spans)
     return {
         "token": token,
@@ -587,8 +590,12 @@ def _assign_ctc_blank_holds(
     line_ranges: list[tuple[int, int]],
     frame_duration: float = 0.02,
     max_extension_seconds: float = 0.2,
+    second_stream: frozenset[int] | set[int] = frozenset(),
 ) -> list[list[TokenSpan]]:
-    """Bounded display-only blank extension, not a silence detector."""
+    """Bounded display-only blank extension, not a silence detector.
+
+    ``second_stream`` groups (inline backing words placed on their own stream) are timed apart from the lead: a word
+    is only held up to the next word of its own stream on the same line."""
     import math
 
     if (
@@ -603,12 +610,19 @@ def _assign_ctc_blank_holds(
     if not line_ranges:
         return result
     line_ends = {end - 1 for _, end in line_ranges if end > 0}
+    line_of = {group: line for line, (start, end) in enumerate(line_ranges) for group in range(start, end)}
     for index in range(len(result) - 1):
         # Do not carry a final word through the pause before the next line.
         # Line containers handle display padding separately.
         if index in line_ends:
             continue
-        current, following = result[index], result[index + 1]
+        following_index = index + 1
+        if second_stream:
+            mine = index in second_stream
+            following_index = next((k for k in range(index + 1, len(result)) if (k in second_stream) == mine), None)
+            if following_index is None or line_of.get(following_index) != line_of.get(index):
+                continue
+        current, following = result[index], result[following_index]
         if not current or not following:
             continue
         next_start = following[0].start
@@ -637,14 +651,16 @@ def _display_span_results(
     frame_times=None,
     fractions=None,
     token_offsets=None,
+    second_stream=frozenset(),
 ):
     """Token times in seconds. ``offset`` moves every time by a fixed amount (timing calibration);
     ``token_offsets`` (onset-class table) adds a per-token amount, ``fractions`` a sub-frame
-    start per token, ``frame_times`` the exact chunk clock."""
+    start per token, ``frame_times`` the exact chunk clock; display holds skip over ``second_stream``
+    tokens (see ``_assign_ctc_blank_holds``)."""
     import os
 
     limit = float(os.environ.get("ECHORA_KARA_MAX_BLANK_HOLD_SECONDS", "0.2"))
-    display = _assign_ctc_blank_holds(spans, ranges, frame_duration, limit)
+    display = _assign_ctc_blank_holds(spans, ranges, frame_duration, limit, second_stream)
     results = []
     for index, (token, raw, held) in enumerate(zip(tokens, spans, display, strict=True)):
         shift = offset + (token_offsets[index] if token_offsets is not None else 0.0)
@@ -667,6 +683,9 @@ def _decode_background_blocks(
     min_token_ms,
     blank_free_tokens,
     margin_seconds=1.0,
+    lead_emission=None,
+    fallback_score=0.0,
+    lead_in_order=False,
 ):
     """Decode each block of consecutive background lines on the background head.
 
@@ -674,7 +693,14 @@ def _decode_background_blocks(
     after it (plus ``margin_seconds``), so an echo may sit on, or just after, the lead it answers.
     Inside the window the block is one duration-floored CTC path, as the lead; a window never starts
     before the previous block's end, so background lines keep their order. Returns the blocks
-    with their token indexes (input order), line sizes and spans (global frames)."""
+    with their token indexes (input order), line sizes, spans (global frames) and ``fallback`` flag.
+
+    Two opt-in switches, both off by default, for an opening block (backing lines before the first lead line):
+    ``lead_in_order`` ends its window where the first lead line starts rather than a margin after its end, since a
+    line written first is sung first. ``fallback_score`` > 0 (with ``lead_emission`` and ``lead_in_order``) decodes
+    such a block again on the lead head when the background head hears it so faintly that its letters average below
+    that probability: on a full mix the background head can stay silent through a soft intro the lead head still
+    picks up."""
     background = aligner_model.last_background_log_probs
     frames = background.shape[0]
     margin = round(margin_seconds / frame_shift)
@@ -699,29 +725,166 @@ def _decode_background_blocks(
         before, after = block["lead_before"] - 1, block["lead_before"]
         start = max(0, lead_line_frames[before][0] - margin) if before >= 0 else 0
         stop = min(frames, lead_line_frames[after][1] + margin) if after < len(lead_line_frames) else frames
+        # Only an opening block: elsewhere the lead head hears the lead itself, and frames it explains would be
+        # taken from the lead's path.
+        opening = lead_in_order and before < 0 and after < len(lead_line_frames)
+        if opening:
+            stop = min(frames, lead_line_frames[after][0])
         groups = [all_encoded[i] for i in block["tokens"]]
         start = max(start, background_end)
         stop = max(stop, min(frames, start + 2 * sum(map(len, groups))))
-        window = background[start:stop].to(torch.float32)
-        try:
-            spans = align_with_minimum_durations(
-                window,
-                groups,
-                blank=aligner_model.blank,
-                minimum_frames=token_minimum_frames(groups, letter_cap, token_cap, vowels),
-                blank_free_tokens=blank_free_tokens,
-            )
-        except RuntimeError:
-            spans = align_with_minimum_durations(
-                window,
-                groups,
-                blank=aligner_model.blank,
-                minimum_frames=[1] * sum(map(len, groups)),
-                blank_free_tokens=blank_free_tokens,
-            )
+
+        def decode(window, groups=groups):
+            try:
+                return align_with_minimum_durations(
+                    window,
+                    groups,
+                    blank=aligner_model.blank,
+                    minimum_frames=token_minimum_frames(groups, letter_cap, token_cap, vowels),
+                    blank_free_tokens=blank_free_tokens,
+                )
+            except RuntimeError:
+                return align_with_minimum_durations(
+                    window,
+                    groups,
+                    blank=aligner_model.blank,
+                    minimum_frames=[1] * sum(map(len, groups)),
+                    blank_free_tokens=blank_free_tokens,
+                )
+
+        spans = decode(background[start:stop].to(torch.float32))
+        block["fallback"] = False
+        if fallback_score > 0 and lead_emission is not None and opening:
+            letters = [s.score for g in spans for s in g]
+            if sum(letters) / max(1, len(letters)) < fallback_score:
+                spans = decode(lead_emission[start:stop].to(torch.float32))
+                block["fallback"] = True
         block["spans"] = [[TokenSpan(s.token, s.start + start, s.end + start, s.score) for s in g] for g in spans]
         background_end = block["spans"][-1][-1].end
     return blocks
+
+
+def frame_rms(waveform: torch.Tensor, sample_rate: int, frame_count: int, frame_shift: float) -> torch.Tensor:
+    """Linear RMS of ``waveform`` per decoder frame (one window per frame of ``frame_shift`` seconds)."""
+    mono = waveform.flatten().float()
+    hop = max(1, int(round(sample_rate * frame_shift)))
+    padded = torch.nn.functional.pad(mono, (0, max(0, frame_count * hop - mono.numel())))
+    return padded[: frame_count * hop].view(frame_count, hop).square().mean(dim=1).sqrt()
+
+
+def pull_to_voice_onset(
+    spans: list[list[TokenSpan]],
+    rms: torch.Tensor,
+    *,
+    frame_shift: float,
+    min_pull_s: float = 0.6,
+    max_pull_s: float = 1.5,
+    silence_s: float = 0.6,
+    relative: float = 0.08,
+) -> list[int]:
+    """Move a token group's start back to the voice onset the model could not hear; returns the moved indexes.
+
+    Audio energy (``rms``, per frame) is used as a voice detector for words the model barely hears: a sustained lone
+    vowel after a long instrumental break gets a few percent letter probability, so the path squeezes it to its
+    floor just before the next word. A frame is loud at ``relative`` x the song's 95th-percentile RMS. When the audio
+    is loud from an onset ``min_pull_s`` to ``max_pull_s`` before a group's start, that onset follows ``silence_s`` of
+    quiet, and no earlier group reaches into it, the group's first letter starts at the onset. Shorter lead-ins are
+    breaths and soft consonants and are left alone. ``spans`` is changed in place.
+    """
+    if rms.numel() == 0:
+        return []
+    top = torch.quantile(rms, 0.95).item() or 1.0
+    loud = (rms >= relative * top).tolist()
+    min_pull, max_pull, silence = (max(1, round(x / frame_shift)) for x in (min_pull_s, max_pull_s, silence_s))
+    moved = []
+    for k, group in enumerate(spans):
+        if not group:
+            continue
+        start = group[0].start
+        if start >= len(loud) or not loud[start]:
+            continue
+        onset = start
+        while onset > 0 and loud[onset - 1] and start - (onset - 1) <= max_pull:
+            onset -= 1
+        if start - onset < min_pull:
+            continue
+        quiet = onset
+        while quiet > 0 and not loud[quiet - 1] and onset - (quiet - 1) <= silence:
+            quiet -= 1
+        if onset - quiet < silence - 1:
+            continue
+        previous_end = max((g[-1].end for g in spans[:k] if g), default=0)
+        if previous_end > onset:
+            continue
+        first = group[0]
+        spans[k] = [TokenSpan(first.token, onset, first.end, first.score), *group[1:]]
+        moved.append(k)
+    return moved
+
+
+def _place_inline_backing(
+    spans,
+    encoded,
+    flags,
+    line_ranges,
+    background,
+    blank,
+    frame_shift,
+    margin_seconds=0.25,
+    letter_frames=2,
+    lead_words_before=3,
+):
+    """Re-place inline bracketed words (a backing phrase inside a lead line) on the background head.
+
+    The lead path keeps them for ordering, but an echo is sung inside or across the lead words, so its lead-path
+    time is only where the path could squeeze it. Each run of flagged groups in a line is decoded alone on the
+    background head (``letter_frames`` floors, blank-free words) in a window from ``lead_words_before`` lead words
+    before the run (minus ``margin_seconds``) to the next line's start (plus the margin), free to overlap the lead;
+    the lead groups stay. The re-placed runs form one monotone stream across the song. ``spans`` is changed in
+    place; returns the moved group indexes."""
+    frames = background.shape[0]
+    margin = round(margin_seconds / frame_shift)
+    moved = []
+    stream_end = 0
+    for li, (start, end) in enumerate(line_ranges):
+        line_flags = flags[start:end]
+        if not any(line_flags) or all(line_flags):
+            continue
+        nxt = line_ranges[li + 1][0] if li + 1 < len(line_ranges) else None
+        hi = min(frames, (spans[nxt][0].start if nxt is not None else spans[end - 1][-1].end) + margin)
+        k = start
+        while k < end:
+            if not flags[k]:
+                k += 1
+                continue
+            last = k
+            while last + 1 < end and flags[last + 1]:
+                last += 1
+            groups = [encoded[i] for i in range(k, last + 1)]
+            need = sum(len(g) for g in groups) * letter_frames
+            # An echo answers the lead words just before it: open the window a few lead words back.
+            lead_before = [i for i in range(start, k) if not flags[i]]
+            anchor = lead_before[-lead_words_before] if len(lead_before) >= lead_words_before else start
+            lo = max(0, spans[anchor][0].start - margin, stream_end)
+            w_lo, w_hi = lo, max(hi, min(frames, lo + need + 2))
+            window = background[w_lo:w_hi].to(torch.float32)
+            try:
+                placed = align_with_minimum_durations(
+                    window,
+                    groups,
+                    blank=blank,
+                    minimum_frames=[letter_frames] * sum(map(len, groups)),
+                    blank_free_tokens=True,
+                )
+            except RuntimeError:
+                k = last + 1
+                continue
+            for i, g in zip(range(k, last + 1), placed):
+                spans[i] = [TokenSpan(t.token, t.start + w_lo, t.end + w_lo, t.score) for t in g]
+                moved.append(i)
+            stream_end = spans[last][-1].end
+            k = last + 1
+    return moved
 
 
 def _merge_background_results(
@@ -800,6 +963,9 @@ def align_audio_with_timeline(
     vocal_activity_file=None,
     blank_free_tokens=False,
     background_lines=None,
+    inline_backing_tokens=None,
+    inline_backing_anchor_words=3,
+    gap_onset_pull=False,
 ):
     """Align the complete song from the audio alone, in one global CTC pass.
 
@@ -820,6 +986,27 @@ def align_audio_with_timeline(
     ``background_lines`` (opt-in) flags token lines sung by a background voice: they leave the
     lead path and are decoded on the checkpoint's background head, block by block, inside the span
     of their neighbouring lead lines, so they may overlap the lead. Results keep the input order.
+    ``inline_backing_tokens`` (opt-in, one flag per acoustic token in input order) marks inline backing words (a
+    bracketed phrase inside a lead line): they stay on the lead path for ordering, then are re-placed on the
+    background head inside their line's window, opening ``inline_backing_anchor_words`` lead words before the
+    phrase; they form a second stream (``"stream": 2`` in their results) that may overlap the lead.
+    ``gap_onset_pull`` (opt-in) moves a word the path starts 0.6 to 1.5 s after a voice onset that follows 0.6 s of
+    quiet back to that onset (``pull_to_voice_onset``).
+
+    Decoder switches read from the environment (defaults in brackets):
+    ``ECHORA_KARA_VOCABLE_VOWELS`` [1] scores a unit spelled only with o/u letters ("oh", "ooh") on max(P(o), P(u)),
+    since singers and transcribers swap the two freely;
+    ``ECHORA_KARA_IN_LINE_GAP_CAP`` [1] bounds what one in-line gap costs in total and
+    ``ECHORA_KARA_IN_LINE_GAP_FREE_COST`` [0.02] is the per-frame cost past that cap (0: linear gap cost; both act
+    only with ``ECHORA_KARA_IN_LINE_GAP_COST`` > 0);
+    ``ECHORA_KARA_LINE_END_EXTEND_S`` [1.2] extends a line's last word through the frames where one of its letters
+    still outscores blank (``ECHORA_KARA_LINE_END_MARGIN`` [0] nats of slack), never into the next lead word.
+    Opt-in experiments, off by default: ``ECHORA_KARA_EMISSION_FLOOR`` (a floor probability for every label in the
+    decode, so a letter the model never hears costs the same everywhere), ``ECHORA_KARA_VOWEL_SIBLINGS`` (nats a
+    vowel pays to be heard as its sibling, i/e and o/u), ``ECHORA_KARA_TEXT_SHARE_NORM=peak`` (shift each token's
+    text-head column so its best frame scores 0), ``ECHORA_KARA_LINE_FIRST_OFFSET_MS`` (extra shift of each line's
+    first word), and ``ECHORA_KARA_BACKGROUND_LEAD_IN_ORDER`` / ``ECHORA_KARA_BACKGROUND_FALLBACK_SCORE`` (see
+    ``_decode_background_blocks``).
     """
     if vocal_activity_source not in VOCAL_ACTIVITY_SOURCES:
         raise ValueError(f"vocal_activity_source must be one of {VOCAL_ACTIVITY_SOURCES}")
@@ -878,6 +1065,12 @@ def align_audio_with_timeline(
     def _decode_lead(emission):
         """Lead path (activity penalty, pace, duration floors) on ``emission``."""
         scoring_emission = emission
+        letter_floor = float(os.environ.get("ECHORA_KARA_EMISSION_FLOOR", "0"))
+        if letter_floor > 0:
+            # Opt-in: no label may cost more than log(floor) per frame in the decode. A letter the model never hears
+            # (the h of a sung "ooh") then costs the same wherever it goes, instead of dragging its word to the frames
+            # where it is least improbable (the breathy onset of the next word). Scores keep the raw values.
+            emission = emission.clamp_min(math.log(letter_floor))
         if vocal_activity_weight > 0:
             # Decode on letters made costlier where the stem is quiet (token scores keep the
             # model's own probabilities).
@@ -906,17 +1099,65 @@ def align_audio_with_timeline(
         gap_cost = float(os.environ.get("ECHORA_KARA_IN_LINE_GAP_COST", "0"))
         has_floors = min_letter_ms > 0 or min_token_ms > 0
         use_extended = has_floors or blank_free_tokens or text_share is not None or edge_weight > 0 or gap_cost > 0
+        # vocable_source: (emission with extra columns, the column each letter of ``encoded`` is decoded on).
+        vocable_source = None
+        if os.environ.get("ECHORA_KARA_VOCABLE_VOWELS", "1") == "1":
+            # A unit spelled only with o/u letters ("ooh" is labelled u, "oh" o) is scored on max(P(o), P(u)): when
+            # the model hears the other vowel the unit has no evidence anywhere and the path crams it.
+            vocabulary = aligner_model.tokenizer.get_vocab()
+            pair = {vocabulary[letter] for letter in "ou" if letter in vocabulary}
+            merged_column = emission.shape[1]
+            flat = [
+                merged_column if all(letter in pair for letter in group) else letter
+                for group in encoded
+                for letter in group
+            ]
+            if len(pair) == 2 and merged_column in flat:
+                merged = emission[:, sorted(pair)].max(dim=1, keepdim=True).values
+                vocable_source = (torch.cat((emission, merged), 1), flat)
+                use_extended = True
+        sibling_penalty = float(os.environ.get("ECHORA_KARA_VOWEL_SIBLINGS", "0"))
+        if sibling_penalty > 0:
+            # Opt-in: a vowel letter may also be heard as its sung sibling (i/e: "been" is labelled bin and often
+            # sung "ben"; o/u) at a cost of this many nats. Without it the path holds the previous word through the
+            # vowel it does hear and crams the word at the end.
+            vocabulary = aligner_model.tokenizer.get_vocab()
+            siblings = {"i": "e", "e": "i", "o": "u", "u": "o"}
+            base, flat = (
+                vocable_source
+                if vocable_source is not None
+                else (emission, [letter for group in encoded for letter in group])
+            )
+            extra, column_of = [], {}
+            for name, other in siblings.items():
+                if name in vocabulary and other in vocabulary:
+                    own, sibling = vocabulary[name], vocabulary[other]
+                    column_of[own] = base.shape[1] + len(extra)
+                    extra.append(torch.maximum(base[:, own], base[:, sibling] - sibling_penalty))
+            if extra:
+                vocable_source = (
+                    torch.cat((base, torch.stack(extra, 1)), 1),
+                    [column_of.get(column, column) for column in flat],
+                )
+                use_extended = True
         if use_extended:
             vocabulary = aligner_model.tokenizer.get_vocab()
             vowels = {vocabulary[letter] for letter in "aeiouy" if letter in vocabulary}
             letter_cap = max(1, round(min_letter_ms / 1000 / frame_shift))
             token_cap = round(min_token_ms / 1000 / frame_shift)
             if has_floors and duration_pace_ratio > 0:
+                pace_emission, pace_groups = emission, encoded
+                if vocable_source is not None:
+                    pace_emission, cursor, pace_groups = vocable_source[0], 0, []
+                    for group in encoded:
+                        pace_groups.append(vocable_source[1][cursor : cursor + len(group)])
+                        cursor += len(group)
                 initial_spans = align_with_minimum_durations(
-                    emission,
-                    encoded,
+                    pace_emission,
+                    pace_groups,
                     blank=aligner_model.blank,
                     minimum_frames=[1 for group in encoded for _ in group],
+                    acoustic_token_groups=encoded,
                     blank_free_tokens=blank_free_tokens,
                 )
                 # Scale each line's floor to its own pace in the plain pass (fast rap stays fast).
@@ -936,18 +1177,16 @@ def align_audio_with_timeline(
             if edge_weight > 0 and edge_logits is None:
                 raise RuntimeError("edge_weight needs a checkpoint with an edge head")
             decode_emission, decode_groups, letter_of = emission, encoded, None
-            if text_share is not None:
-                # Text bonus: one pseudo-label per (token, letter) = the letter's column + beta x the
-                # head's log P(token | singing) for that token; mapped back to letters below.
+            if text_share is not None or vocable_source is not None:
+                # One pseudo-label per (token, letter), mapped back to letters below.
                 letter_of = [letter for group in encoded for letter in group]
+                columns = emission[:, letter_of] if vocable_source is None else vocable_source[0][:, vocable_source[1]]
+            if text_share is not None:
+                # Text bonus: the letter's column + beta x the head's log P(token | singing) for that token.
                 owner = [k for k, group in enumerate(encoded) for _ in group]
-                decode_emission = torch.cat(
-                    (
-                        emission[:, letter_of] + text_bonus * text_share[:, owner].to(emission),
-                        emission[:, aligner_model.blank : aligner_model.blank + 1],
-                    ),
-                    1,
-                )
+                columns = columns + text_bonus * text_share[:, owner].to(emission)
+            if letter_of is not None:
+                decode_emission = torch.cat((columns, emission[:, aligner_model.blank : aligner_model.blank + 1]), 1)
                 decode_groups, cursor = [], 0
                 for group in encoded:
                     decode_groups.append(list(range(cursor, cursor + len(group))))
@@ -961,6 +1200,10 @@ def align_audio_with_timeline(
                 # Opt-in: cost per blank frame inside a line (gaps go between lines).
                 line_ranges=line_acoustic_ranges,
                 in_line_gap_cost=gap_cost,
+                # The most one in-line gap may cost in total, plus a small per-frame cost past it so a word
+                # cannot jump seconds ahead (cap 0: the cost stays linear).
+                in_line_gap_cap=float(os.environ.get("ECHORA_KARA_IN_LINE_GAP_CAP", "1")),
+                in_line_gap_free_cost=float(os.environ.get("ECHORA_KARA_IN_LINE_GAP_FREE_COST", "0.02")),
             )
             try:
                 initial_spans = align_with_minimum_durations(
@@ -1028,6 +1271,11 @@ def align_audio_with_timeline(
                 lines.append(line_index)
                 cursor += 1
         text_share = aligner_model.text_token_share(raw_emission, groups_all, voices, lines)
+        if os.environ.get("ECHORA_KARA_TEXT_SHARE_NORM", "") == "peak":
+            # Opt-in: the share is a softmax over the song's tokens, so a word sung many times peaks well below a
+            # unique word, and blanks get no term at all: repeated words are always costlier than silence. Shift
+            # each token's column so its best frame scores 0; its shape over time is unchanged.
+            text_share = text_share - text_share.max(dim=0, keepdim=True).values
     emission, scoring_emission, initial_spans, duration_floor = _decode_lead(emission)
     background_blocks = None
     if background_plan is not None:
@@ -1044,12 +1292,41 @@ def align_audio_with_timeline(
             min_letter_ms,
             min_token_ms,
             blank_free_tokens,
+            lead_emission=raw_emission,
+            fallback_score=float(os.environ.get("ECHORA_KARA_BACKGROUND_FALLBACK_SCORE", "0")),
+            lead_in_order=os.environ.get("ECHORA_KARA_BACKGROUND_LEAD_IN_ORDER", "0") == "1",
         )
         explained = raw_emission.clone()
         for block in background_blocks:
             for group in block["spans"]:
                 explained[group[0].start : group[-1].end, aligner_model.blank] = 0.0
         emission, scoring_emission, initial_spans, duration_floor = _decode_lead(explained)
+
+    inline_moved = []
+    if inline_backing_tokens is not None and any(inline_backing_tokens):
+        if background_plan is not None:
+            if len(inline_backing_tokens) != len(all_tokens):
+                raise ValueError("inline_backing_tokens needs one flag per acoustic token")
+            inline_backing_tokens = [inline_backing_tokens[i] for i in lead_indexes]
+        if len(inline_backing_tokens) != len(acoustic_tokens):
+            raise ValueError("inline_backing_tokens needs one flag per acoustic token")
+        if aligner_model.last_background_log_probs is None:
+            raise RuntimeError("inline_backing_tokens needs a checkpoint with a background head")
+        inline_moved = _place_inline_backing(
+            initial_spans,
+            encoded,
+            list(inline_backing_tokens),
+            line_acoustic_ranges,
+            aligner_model.last_background_log_probs,
+            aligner_model.blank,
+            frame_shift,
+            lead_words_before=inline_backing_anchor_words,
+        )
+
+    gap_pulled = []
+    if gap_onset_pull:
+        rms = frame_rms(waveform, sample_rate, emission.shape[0], frame_shift)
+        gap_pulled = pull_to_voice_onset(initial_spans, rms, frame_shift=frame_shift)
 
     frame_times = None
     if exact_frame_clock:
@@ -1066,12 +1343,22 @@ def align_audio_with_timeline(
         "source_timeline": "ignored",
         "minimum_duration": duration_floor,
         "in_line_gap_cost": float(os.environ.get("ECHORA_KARA_IN_LINE_GAP_COST", "0")),
+        "in_line_gap_cap": float(os.environ.get("ECHORA_KARA_IN_LINE_GAP_CAP", "1")),
+        "emission_floor": float(os.environ.get("ECHORA_KARA_EMISSION_FLOOR", "0")),
+        "vocable_vowels": os.environ.get("ECHORA_KARA_VOCABLE_VOWELS", "1") == "1",
+        "vowel_siblings": float(os.environ.get("ECHORA_KARA_VOWEL_SIBLINGS", "0")),
+        "text_share_norm": os.environ.get("ECHORA_KARA_TEXT_SHARE_NORM", ""),
+        "line_first_offset_ms": float(os.environ.get("ECHORA_KARA_LINE_FIRST_OFFSET_MS", "0")),
         "text_bonus_requested": text_bonus,
         "text_bonus_status": (
             "applied" if text_share is not None else "unavailable_no_text_head" if text_bonus > 0 else "disabled"
         ),
         "timing_offset_ms": timing_offset_ms,
         "vocal_activity_weight": vocal_activity_weight,
+        "gap_onset_pull": bool(gap_onset_pull),
+        "gap_onset_pulled_groups": len(gap_pulled),
+        "inline_backing": inline_backing_tokens is not None,
+        "inline_backing_moved_groups": len(inline_moved),
         "ctc_blank_hold_assignment": "bounded_display_extension_not_silence_aware",
         "inference_audio_speed": speed,
     }
@@ -1099,7 +1386,77 @@ def align_audio_with_timeline(
         frame_times,
         fractions,
         token_offsets,
+        frozenset(inline_moved),  # second-stream tokens: display holds skip over them
     )
+    second = frozenset(inline_moved)
+    line_first_ms = float(os.environ.get("ECHORA_KARA_LINE_FIRST_OFFSET_MS", "0"))
+    if line_first_ms:
+        # Opt-in: a line's first word starts later against reference timing than the words after it, so its start
+        # gets an extra shift. Only the start moves; it never passes the start of the lead word before it, whose end
+        # gives way.
+        for first, last in line_acoustic_ranges:
+            index = next((k for k in range(first, last) if k not in second), None)
+            item = results[index] if index is not None else None
+            if item is None or "original_start" not in item:
+                continue
+            start = max(0.0, item["original_start"] + line_first_ms / 1000.0)
+            before = next(
+                (results[k] for k in range(index - 1, -1, -1) if k not in second and "original_start" in results[k]),
+                None,
+            )
+            if before is not None:
+                start = max(start, before["original_start"])
+                if before["original_end"] > start:
+                    before["original_end"] = start
+                    before["end"] = _format_time(start)
+            start = min(start, item["original_end"])
+            item["original_start"] = start
+            item["start"] = _format_time(start)
+    end_extend = float(os.environ.get("ECHORA_KARA_LINE_END_EXTEND_S", "1.2"))
+    if end_extend > 0:
+        # A line's last word often ends before its final sound is sung: the path crams its letters into a few frames
+        # and leaves the held vowel and a late final consonant to the gap. Extend its end through the frames where
+        # one of its letters still outscores blank (by ECHORA_KARA_LINE_END_MARGIN nats of slack), up to
+        # ``end_extend`` seconds and never past the start of a later lead word.
+        end_margin = float(os.environ.get("ECHORA_KARA_LINE_END_MARGIN", "0"))
+        step = frame_shift * speed
+        shift = timing_offset_ms / 1000.0
+        frames_total = raw_emission.shape[0]
+        extended = 0
+        for first, last in line_acoustic_ranges:
+            index = next((k for k in range(last - 1, first - 1, -1) if k not in second), None)
+            item = results[index] if index is not None else None
+            if item is None or "original_end" not in item:
+                continue
+            letters = [letter for letter in encoded[index] if letter != aligner_model.blank]
+            if not letters:
+                continue
+            limit = min(frames_total, round((item["original_end"] - shift + end_extend) / step))
+            # The next line's first word may be an echo on the second stream, so take the earliest later lead start.
+            later = [
+                results[k]["original_start"]
+                for k in range(last, len(results))
+                if k not in second and "original_start" in results[k]
+            ]
+            if later:
+                limit = min(limit, int((min(later) - shift) / step))
+            frame = round((item["original_end"] - shift) / step)
+            start_frame = frame
+            while frame < limit:
+                row = raw_emission[frame]
+                if float(row[letters].max()) <= float(row[aligner_model.blank]) + end_margin:
+                    break
+                frame += 1
+            if frame > start_frame:
+                end = frame * step + shift
+                if later:
+                    end = min(end, min(later))
+                item["original_end"] = end
+                item["end"] = _format_time(end)
+                extended += 1
+        diagnostics["line_end_extend"] = {"seconds": end_extend, "extended_words": extended}
+    for index in inline_moved:
+        results[index]["stream"] = 2  # re-placed echo: its own monotone stream, may overlap the lead
     if background_plan is not None:
         results = _merge_background_results(
             results,
@@ -1114,6 +1471,9 @@ def align_audio_with_timeline(
         diagnostics["background_decoding"] = {
             "head": "background_head",
             "lines": sum(1 for _, flag, _ in background_plan if flag),
+            "fallback_blocks": sum(1 for block in background_blocks if block.get("fallback")),
+            "fallback_score": float(os.environ.get("ECHORA_KARA_BACKGROUND_FALLBACK_SCORE", "0")),
+            "lead_in_order": os.environ.get("ECHORA_KARA_BACKGROUND_LEAD_IN_ORDER", "0") == "1",
         }
         token_lines = all_token_lines
     for result in results:
