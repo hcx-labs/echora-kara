@@ -16,8 +16,8 @@ This repository holds everything needed to reproduce the model:
 
 - **Inference and the alignment engine**: emission extraction, a global CTC decoder with duration and
   vocal-activity constraints, backing-vocal decoding and ASS / LRC output.
-- **The model**: an acoustic CTC aligner with MuQ music-feature fusion, an onset head, a background-vocal
-  head and a text-conditioned alignment head.
+- **The model**: an acoustic CTC aligner with an onset head, a background-vocal head and a
+  text-conditioned alignment head.
 - **The lyric normalizer**: romanised, pronunciation-aware letter labels for many languages and scripts.
 - **Dataset preparation**: turning word-timed lyrics (TTML) and audio into training manifests, with
   quality gates and artist-disjoint splits.
@@ -28,14 +28,11 @@ This repository holds everything needed to reproduce the model:
 ```mermaid
 flowchart LR
   A[Song audio<br/>original mix] --> E[Acoustic encoder<br/>wav2vec2, 24 layers]
-  A --> M[MuQ-large<br/>frozen + LoRA]
-  M -->|layer 11, gated| F((+))
-  E --> F
   L[Lyrics] --> N[Normalizer<br/>romanised letter labels]
-  F --> H1[CTC head<br/>lead vocals]
-  F --> H2[Background head<br/>backing vocals]
-  F --> H3[Edge head<br/>token onsets]
-  F --> T[Text head<br/>cross-attention to the lyrics]
+  E --> H1[CTC head<br/>lead vocals]
+  E --> H2[Background head<br/>backing vocals]
+  E --> H3[Edge head<br/>token onsets]
+  E --> T[Text head<br/>cross-attention to the lyrics]
   N --> T
   N --> D
   H1 --> D[Alignment engine<br/>global constrained CTC decode]
@@ -48,9 +45,8 @@ flowchart LR
    each spelled with a 30-symbol alphabet: `a`–`z`, apostrophe, word separator, unknown and blank. English,
    German and French are spelled by sound. Other scripts are romanised by reading (see [Labels](#labels)).
 2. **Compute frame posteriors.** The encoder turns 16 kHz audio into 20 ms frames, in 45 s chunks with
-   shared context that are stitched on an exact frame clock. MuQ features are fused into every frame, and
-   each head produces its own per-frame output. The text head reads the stitched frames in 25 s windows,
-   the length it is trained on.
+   shared context that are stitched on an exact frame clock. Each head produces its own per-frame
+   output. The text head reads the stitched frames in 25 s windows, the length it is trained on.
 3. **Decode the whole song at once.** The engine runs one constrained Viterbi alignment of all lyric
    units against the full song's posteriors. It penalises frames without vocal activity, discourages
    gaps inside a line, enforces paced minimum durations, and adds the text head's per-frame evidence as a
@@ -66,14 +62,11 @@ flowchart LR
 |---|---|---|
 | Acoustic encoder | wav2vec2-style transformer, 24 layers, width 1024, 16 heads, convolutional front end (stride 320 at 16 kHz, so 20 ms frames). Initialised from Meta's omniASR CTC 300M v2, converted to Hugging Face `Wav2Vec2ForCTC` with a parity check | 315 M |
 | CTC head | linear, 30 outputs (letters, apostrophe, word separator, unknown, blank) | 31 k |
-| MuQ fusion | MuQ-large (`OpenMuQ/MuQ-large-msd-iter`), frozen, run at 24 kHz. Hidden layer 11 is resampled to the 20 ms clock, projected to width 1024 and added to the encoder output through a learned gate that starts at zero, so training begins from the plain aligner | 1.05 M projection |
-| MuQ LoRA | low-rank adapters (rank 32, alpha 64) on MuQ blocks 4–11, on the attention query/value projections and both feed-forward layers; new adapter weights start at zero | 6.3 M |
 | Edge head | per-frame logit that a new acoustic unit starts on this frame | 1 k |
 | Background head | a second CTC head trained on backing-vocal phrases, decoded on its own path | 31 k |
 | Text head | 6 text-encoder layers over the song's letters (letter, in-line position and line embeddings), then 4 cross-attention layers from audio frames to text (width 512, 8 heads, QK-norm). Per frame it predicts which letter is being sung and whether the lead and backing voices are singing | 38.3 M |
 
-That is about 361 M trainable parameters, plus the frozen MuQ encoder. MuQ is the only component that
-has seen music beyond the training set, and it is what keeps the aligner on the voice in dense mixes.
+That is about 354 M trainable parameters.
 
 ### Labels
 
@@ -105,8 +98,8 @@ A model must be run with the rule set it was trained on, and checkpoints record 
   - a background-head CTC loss;
   - the text-head losses (letter cross-entropy, singing BCE and a forward-sum alignment term) for lead and
     backing voices.
-- **Optimiser**: AdamW with separate parameter groups and learning rates for the encoder, fusion, LoRA,
-  background head and text head. The text head uses weight decay. Schedules are warm-up/stable/decay
+- **Optimiser**: AdamW with separate parameter groups and learning rates for the encoder, background head
+  and text head. The text head uses weight decay. Schedules are warm-up/stable/decay
   (WSD) or cosine. Every stable-phase checkpoint keeps its optimiser state, so it can be extended or
   branched into its own decay.
 - **Evaluation**: besides frame metrics, each evaluation decodes held-out songs end to end with the
@@ -151,7 +144,7 @@ bonus weight was picked on five of the 79 songs, so the figures are lightly tune
 ```
 src/echora_kara/
   engine/      CTC alignment engine and the emission/decoding aligner
-  model/       MuQ fusion, LoRA, text head, song-text features
+  model/       text head, song-text features, experimental MuQ fusion
   text/        lyric normalizer and label rules
   inference/   command line, worker, ASS/LRC writers
   data/        dataset preparation: TTML parsing, manifests, gates, vocal activity
@@ -181,7 +174,7 @@ are treated as backing vocals, and so are bracketed words inside a line, such as
 ```sh
 mkdir work && cp lyrics.txt work/i.txt
 echora-kara-align --path_io work --input_audio /music/song.flac --input_text i.txt \
-  --model yohane --hf_model_path /models/echora-kara --fusion on --label_rules v3-sung --lang auto \
+  --model yohane --hf_model_path /models/echora-kara --label_rules v3-sung --lang auto \
   --head_correct 0 --tail_correct 0 --timing_offset_ms 0 \
   --min_token_ms 100 --min_letter_ms 40 --duration_pace_ratio 0.9 --vocal_activity_weight 2.0 \
   --exact_frame_clock --blank_free_tokens --background_decoding --inline_backing
@@ -192,7 +185,6 @@ with per-token times and diagnostics. These flags are the recommended decoder se
 
 | Flag / variable | Effect |
 |---|---|
-| `--fusion on` | load the MuQ branch for checkpoints trained with it; `gate0` runs the same checkpoint without MuQ, for ablation |
 | `--label_rules` | must match the rules the checkpoint was trained with |
 | `--detect_language en,de,fr,...` | with `--lang auto`, identify the lyrics' language from their lines (fastText) among the listed ones; without a language, Latin words are spelled letter by letter, which a model trained on pronunciation labels follows poorly. The result is recorded as `normalization_language_source` |
 | `--blank_free_tokens` | no blank frames inside a unit, as in training, so held notes stay on their word |
@@ -284,8 +276,6 @@ python -m echora_kara.train.train --data manifests/compact_s4_005 --root /datase
   --freeze-encoder-steps 1000 --head-warmup-lr 1e-5 \
   --max-steps 200000 --lr-schedule wsd --decay-steps 20000 --eval-steps 2000 --save-steps 2000 \
   --edge-loss-weight 1.0 --edge-positive-weight 20 --edge-emd-weight 1.0 --edge-tolerance-frames 1 \
-  --fusion muq --fusion-layer 11 --fusion-model OpenMuQ/MuQ-large-msd-iter --fusion-gate scalar --fusion-lr 8e-5 \
-  --fusion-lora-rank 32 --fusion-lora-alpha 64 --fusion-lora-layers 8 --fusion-lora-targets qv_ffn --fusion-lora-lr 8e-5 \
   --background-head-weight 0.5 --background-blank-weight 0.2 --background-blank-bias 5.0 --background-head-lr 8e-4 \
   --song-text-version 2 --text-aligner-weight 0.5 --text-aligner-lr 1e-4 --text-aligner-dim 512 --text-aligner-heads 8 \
   --text-aligner-text-layers 6 --text-aligner-cross-layers 4 --text-aligner-fs-weight 0.02 --text-aligner-back-weight 0.5 \
@@ -297,8 +287,16 @@ Useful extras:
 - `--resume` continues a run on the same data.
 - `--init-optimizer-from CHECKPOINT` warm-starts the Adam moments when branching onto new data or a new
   schedule.
-- `--fusion-lora-grow` widens a checkpoint's MuQ LoRA (rank, blocks or targets) without changing its
-  output at step 0.
+
+#### Experimental: MuQ fusion
+
+The trainer can add features from a frozen [MuQ-large](https://github.com/tencent-ailab/MuQ) to the
+encoder output through a learned gate (`--fusion muq`, optionally with LoRA adapters via
+`--fusion-lora-rank`). The published model does not use it: in its training run the gate stayed at zero,
+so the branch contributed nothing and is not part of the released weights. The code and flags remain for
+experiments. They need `pip install -e '.[fusion]'`, checkpoints trained with them are loaded with
+`--fusion on`, and such checkpoints inherit MuQ's CC BY-NC 4.0 terms. The reference scripts under
+`scripts/` still carry the fusion flags they were run with.
 
 #### Continuing the reference run on another machine
 
@@ -319,8 +317,8 @@ manifests, and a single GPU.
 
 Echora Kara is licensed under the [GNU Affero General Public License v3.0](LICENSE).
 
-Model weights that include the MuQ fusion branch inherit MuQ's **CC BY-NC 4.0** licence, so they may
-only be used non-commercially. The English, German and French label rules use espeak-ng and phonemizer
+The published model weights are released separately under **CC BY-NC 4.0** (see the
+[model card](https://huggingface.co/hcxlabs/echora-kara-300m)). The English, German and French label rules use espeak-ng and phonemizer
 (both GPL-3.0). See [NOTICE](NOTICE) for third-party terms.
 
 ## Acknowledgements
@@ -330,7 +328,6 @@ only be used non-commercially. The English, German and French label rules use es
   [Forced-Alignment-For-NicoKara](https://github.com/oHEILIo/Forced-Alignment-For-NicoKara).
 - **[Omnilingual ASR](https://github.com/facebookresearch/omnilingual-asr)** (Meta, Apache-2.0) for the
   encoder initialisation.
-- **[MuQ](https://github.com/tencent-ailab/MuQ)** (Tencent AI Lab) for music representations.
 - **[espeak-ng](https://github.com/espeak-ng/espeak-ng)**, **[phonemizer](https://github.com/bootphon/phonemizer)**,
   the **CMU Pronouncing Dictionary**, **[JMdict / KANJIDIC2](https://www.edrdg.org/)** (EDRDG),
   **[pykakasi](https://codeberg.org/miurahr/pykakasi)**, **[pypinyin](https://github.com/mozillazg/python-pinyin)**,
