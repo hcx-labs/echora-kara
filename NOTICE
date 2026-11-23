@@ -34,8 +34,9 @@ FA-Kara itself drew on yohane (https://github.com/Japan7/yohane) and Forced-Alig
 
 Third-party models and data used at runtime (not distributed with this repository):
 - omniASR CTC 300M v2, Meta (Apache-2.0): initial acoustic encoder weights.
-- MuQ-large-msd-iter, Tencent AI Lab (model weights CC BY-NC 4.0): frozen music-feature encoder.
-  Models that include the MuQ fusion branch inherit its non-commercial condition.
+- MuQ-large-msd-iter, Tencent AI Lab (model weights CC BY-NC 4.0): used only by the optional,
+  experimental fusion branch, not by the published model. Checkpoints trained with that branch
+  inherit its non-commercial condition.
 - fastText lid.176 (CC BY-SA 3.0): language identification.
 - JMdict furigana segmentation and KANJIDIC2, EDRDG (CC BY-SA 4.0): Japanese readings.
 - CMU Pronouncing Dictionary (BSD-style), via NLTK.
