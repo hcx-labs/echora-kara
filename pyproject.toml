@@ -17,7 +17,6 @@ dependencies = [
   "torchaudio==2.11.0",
   "transformers>=5.15.1,<5.17",
   "safetensors>=0.4",
-  "muq==0.1.0",
   "librosa==0.11.0",
   "soundfile==0.13.1",
   # Lyric normalizer: romanised, pronunciation-aware labels for many scripts and languages.
@@ -39,6 +38,8 @@ dependencies = [
 
 [project.optional-dependencies]
 data = ["scipy>=1.13"]
+# MuQ fusion branch (--fusion): needed by echora-kara-700m-muq, not by echora-kara-300m.
+fusion = ["muq==0.1.0"]
 # The versions the reference run trained with (resume reproduces its batches and optimizer state).
 train = ["scipy>=1.13", "transformers==5.16.1", "accelerate==1.14.0", "wandb==0.29.0"]
 dev = ["pytest"]

@@ -9,7 +9,8 @@
 # flattened MuQ's features to a near constant within a few hundred steps.
 #
 # GPUS=N (1, 2, 4 or 8) runs N torchrun processes and keeps 8 windows per optimizer step, as in
-# scripts/train_clean100k_dm.sh, whose header also lists the dataset layout and requirements.
+# scripts/train_clean100k_dm.sh, whose header also lists the dataset layout and requirements. MuQ also needs
+# pip install -e '.[fusion]'.
 #
 # Usage: DATASET=/datasets GPUS=8 sh scripts/train_700m_muq.sh --no-gradient-checkpointing
 #        (resume: the same command with --resume)
