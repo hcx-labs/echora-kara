@@ -38,7 +38,7 @@ dependencies = [
 
 [project.optional-dependencies]
 data = ["scipy>=1.13"]
-# Experimental MuQ fusion branch (--fusion); not needed for the published model.
+# MuQ fusion branch (--fusion): needed by echora-kara-700m-muq, not by echora-kara-300m.
 fusion = ["muq==0.1.0"]
 # The versions the reference run trained with (resume reproduces its batches and optimizer state).
 train = ["scipy>=1.13", "transformers==5.16.1", "accelerate==1.14.0", "wandb==0.29.0"]

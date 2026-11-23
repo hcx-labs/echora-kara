@@ -17,7 +17,7 @@ This repository holds everything needed to reproduce the model:
 - **Inference and the alignment engine**: emission extraction, a global CTC decoder with duration and
   vocal-activity constraints, backing-vocal decoding and ASS / LRC output.
 - **The model**: an acoustic CTC aligner with an onset head, a background-vocal head and a
-  text-conditioned alignment head.
+  text-conditioned alignment head; the 700M MuQ model adds music features from a frozen MuQ encoder.
 - **The lyric normalizer**: romanised, pronunciation-aware letter labels for many languages and scripts.
 - **Dataset preparation**: turning word-timed lyrics (TTML) and audio into training manifests, with
   quality gates and artist-disjoint splits.
@@ -58,15 +58,27 @@ flowchart LR
 
 ## Model
 
+Two sets of weights are published:
+
+| Model | Parameters | MuQ |
+|---|---|---|
+| [`hcxlabs/echora-kara-300m`](https://huggingface.co/hcxlabs/echora-kara-300m) | 354 M | none: its gate stayed at zero, so the branch was left out of the weights |
+| [`hcxlabs/echora-kara-700m-muq`](https://huggingface.co/hcxlabs/echora-kara-700m-muq) | 361 M, plus the frozen MuQ-large (333 M): 694 M running | required (`--fusion on`): trained with the gate fixed at 0.1 |
+
+Each model card reports that model's own benchmark. The recipe of the 700M MuQ model is
+[`scripts/train_700m_muq.sh`](scripts/train_700m_muq.sh).
+
 | Component | What it is | Parameters |
 |---|---|---|
 | Acoustic encoder | wav2vec2-style transformer, 24 layers, width 1024, 16 heads, convolutional front end (stride 320 at 16 kHz, so 20 ms frames). Initialised from Meta's omniASR CTC 300M v2, converted to Hugging Face `Wav2Vec2ForCTC` with a parity check | 315 M |
 | CTC head | linear, 30 outputs (letters, apostrophe, word separator, unknown, blank) | 31 k |
 | Edge head | per-frame logit that a new acoustic unit starts on this frame | 1 k |
 | Background head | a second CTC head trained on backing-vocal phrases, decoded on its own path | 31 k |
+| MuQ fusion (700M MuQ only) | MuQ-large (`OpenMuQ/MuQ-large-msd-iter`), frozen, run at 24 kHz. Hidden layer 11 is resampled to the 20 ms clock, projected to width 1024 and added to the encoder output through a gate fixed at 0.1 | 1.05 M projection |
+| MuQ LoRA (700M MuQ only) | low-rank adapters (rank 32, alpha 64) on MuQ blocks 4–11, on the attention query/value projections and both feed-forward layers | 6.3 M |
 | Text head | 6 text-encoder layers over the song's letters (letter, in-line position and line embeddings), then 4 cross-attention layers from audio frames to text (width 512, 8 heads, QK-norm). Per frame it predicts which letter is being sung and whether the lead and backing voices are singing | 38.3 M |
 
-That is about 354 M trainable parameters.
+That is about 354 M trainable parameters, and 361 M with the MuQ projection and LoRA.
 
 ### Labels
 
@@ -106,6 +118,9 @@ A model must be run with the rule set it was trained on, and checkpoints record 
   production decoder and reports word-start error (median, mean, share over 500 ms).
 
 ## Benchmark
+
+The figures in this section are for `echora-kara-300m`; `echora-kara-700m-muq` reports its own on its
+model card.
 
 Word-start error on [JamendoLyrics MultiLang](https://github.com/f90/jamendolyrics): 79 songs and 21,580
 words in English, German, Spanish and French. Songs are aligned on the original mix, with no vocal
@@ -287,16 +302,21 @@ Useful extras:
 - `--resume` continues a run on the same data.
 - `--init-optimizer-from CHECKPOINT` warm-starts the Adam moments when branching onto new data or a new
   schedule.
+- `--fusion-gate-init` and `--fusion-gate-hold-steps` start the MuQ gate at a value and keep it fixed;
+  `--fusion-gentle-warmup` keeps the MuQ LoRA untrained while the encoder is frozen. Together they make
+  the model use MuQ (see [`scripts/train_700m_muq.sh`](scripts/train_700m_muq.sh)).
+- `--fusion-lora-grow` widens a checkpoint's MuQ LoRA (rank, blocks or targets) without changing its
+  output at step 0.
 
-#### Experimental: MuQ fusion
+#### MuQ fusion
 
 The trainer can add features from a frozen [MuQ-large](https://github.com/tencent-ailab/MuQ) to the
-encoder output through a learned gate (`--fusion muq`, optionally with LoRA adapters via
-`--fusion-lora-rank`). The published model does not use it: in its training run the gate stayed at zero,
-so the branch contributed nothing and is not part of the released weights. The code and flags remain for
-experiments. They need `pip install -e '.[fusion]'`, checkpoints trained with them are loaded with
-`--fusion on`, and such checkpoints inherit MuQ's CC BY-NC 4.0 terms. The reference scripts under
-`scripts/` still carry the fusion flags they were run with.
+encoder output through a gate (`--fusion muq`, optionally with LoRA adapters via `--fusion-lora-rank`).
+With a trainable gate that starts at zero, the gate never opened: in the run behind `echora-kara-300m` it
+stayed at zero, so the branch contributed nothing and is not part of those weights. Held open at 0.1
+(`--fusion-gate-init 0.1 --fusion-gate-hold-steps`), the projection and LoRA have to become useful; that
+run is `echora-kara-700m-muq`, which needs MuQ at inference. Fusion needs `pip install -e '.[fusion]'`,
+checkpoints trained with it are loaded with `--fusion on`, and they inherit MuQ's CC BY-NC 4.0 terms.
 
 #### Continuing the reference run on another machine
 
@@ -317,8 +337,9 @@ manifests, and a single GPU.
 
 Echora Kara is licensed under the [GNU Affero General Public License v3.0](LICENSE).
 
-The published model weights are released separately under **CC BY-NC 4.0** (see the
-[model card](https://huggingface.co/hcxlabs/echora-kara-300m)). The English, German and French label rules use espeak-ng and phonemizer
+The published model weights are released separately under **CC BY-NC 4.0** (see the model cards of
+[`echora-kara-300m`](https://huggingface.co/hcxlabs/echora-kara-300m) and
+[`echora-kara-700m-muq`](https://huggingface.co/hcxlabs/echora-kara-700m-muq)). The English, German and French label rules use espeak-ng and phonemizer
 (both GPL-3.0). See [NOTICE](NOTICE) for third-party terms.
 
 ## Acknowledgements

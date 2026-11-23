@@ -1619,6 +1619,22 @@ class AlignmentCollator:
 HEAD_PREFIXES = ("lm_head", "edge_head", "fusion", "background_head", "text_aligner")
 
 
+class FusionGateHold(TrainerCallback):
+    """--fusion-gate-hold-steps: the MuQ gate gets no gradient before ``steps``. Applied at every step begin,
+    after HeadWarmup (which resets requires_grad on its own transitions)."""
+
+    def __init__(self, model, steps: int):
+        self.model, self.steps, self.held = model, steps, None
+
+    def on_step_begin(self, args, state, control, **kwargs):
+        """Hold or release the gate for this step."""
+        held = state.global_step < self.steps
+        self.model.fusion.gate.requires_grad_(not held)
+        if held != self.held:
+            self.held = held
+            print(f"note: fusion gate {'held fixed' if held else 'released'} at step {state.global_step}", flush=True)
+
+
 class CompletedSave(TrainerCallback):
     """After each save on the main process, write the checkpoint's completion marker and prune old optimizer states."""
 
@@ -1784,6 +1800,7 @@ def head_warmup_optimizer(
     lr_schedule: str = "cosine",
     decay_steps: int = 0,
     text_weight_decay: float = 0.0,
+    fusion_gentle_warmup: bool = False,
 ):
     """The Trainer's default optimizer (fused AdamW, no weight decay) in two parameter groups with
     their own schedules: the head runs at ``head_lr`` while the encoder is frozen (its own rate is
@@ -1883,8 +1900,15 @@ def head_warmup_optimizer(
         lambda step: head_lr / learning_rate if step < freeze_steps else cosine(step),
     ]
     if fusion:
+        # fusion_gentle_warmup: at head_lr (1e-3) with the encoder frozen, the MuQ LoRA collapsed MuQ's layer-11
+        # features to a near constant within a few hundred steps. With it, the projection warms up at its own
+        # rate and the LoRA waits for the encoder.
         lambdas.append(
-            lambda step: head_lr / learning_rate if step < freeze_steps else cosine(step) * fusion_lr / learning_rate
+            lambda step: (
+                (fusion_lr if fusion_gentle_warmup else head_lr) / learning_rate
+                if step < freeze_steps
+                else cosine(step) * fusion_lr / learning_rate
+            )
         )
     if background:
         lambdas.append(
@@ -1894,7 +1918,11 @@ def head_warmup_optimizer(
         )
     if lora:
         lambdas.append(
-            lambda step: head_lr / learning_rate if step < freeze_steps else cosine(step) * lora_lr / learning_rate
+            lambda step: (
+                (0.0 if fusion_gentle_warmup else head_lr / learning_rate)
+                if step < freeze_steps
+                else cosine(step) * lora_lr / learning_rate
+            )
         )
     if text:
         lambdas.append(
@@ -2553,6 +2581,27 @@ def arguments():
         help="Projections adapted: attention q/v, or q/v plus both FFN layers.",
     )
     fusion.add_argument(
+        "--fusion-gate-init",
+        type=float,
+        default=None,
+        help="Start the MuQ gate at this value instead of the loaded one (or zero). A gate at zero gives the "
+        "projection and LoRA no gradient, and a trainable gate that starts there may never open.",
+    )
+    fusion.add_argument(
+        "--fusion-gate-hold-steps",
+        type=int,
+        default=0,
+        help="Keep the MuQ gate fixed (not trained) for this many steps. A fresh projection is noise at first, "
+        "and one scalar closes faster than the projection learns; held open, the projection and LoRA must "
+        "become useful. Echora Kara 700M MuQ: --fusion-gate-init 0.1 --fusion-gate-hold-steps 100000.",
+    )
+    fusion.add_argument(
+        "--fusion-gentle-warmup",
+        action="store_true",
+        help="While the encoder is frozen: MuQ LoRA not trained, projection at --fusion-lr instead of "
+        "--head-warmup-lr (which collapsed MuQ's features to a constant). Needs --fusion-lr and --fusion-lora-lr.",
+    )
+    fusion.add_argument(
         "--fusion-lora-lr",
         type=float,
         default=None,
@@ -2802,6 +2851,10 @@ def main():
             model.warm_start_fusion()
         if model.fusion_lora is not None and any(key.startswith("fusion_lora.") for key in loading["missing_keys"]):
             model.fusion_lora.reset_parameters()  # fresh LoRA: B = 0, the model is unchanged at step 0
+        if args.fusion_gate_init is not None:
+            with torch.no_grad():
+                model.fusion.gate.fill_(args.fusion_gate_init)
+            print(f"note: fusion gate starts at {args.fusion_gate_init}", flush=True)
         # Under torchrun each rank loads MuQ onto its own GPU (it also follows its input there at forward time).
         model.attach_fusion_backbone(muq_fusion.MuQBranch(args.fusion_model, device=f"cuda:{LOCAL_RANK}"))
     if text_head:
@@ -2989,6 +3042,8 @@ def main():
     optimizers = (None, None)
     if args.freeze_encoder_steps:
         callbacks.append(HeadWarmup(model, args.freeze_encoder_steps))
+    if args.fusion == "muq" and args.fusion_gate_hold_steps > 0:
+        callbacks.append(FusionGateHold(model, args.fusion_gate_hold_steps))
     if args.decoder_margin_weight and (args.decoder_margin_start_step or args.decoder_margin_ramp_steps):
         callbacks.append(DecoderMarginRamp(model, args.decoder_margin_start_step, args.decoder_margin_ramp_steps))
     if args.guard_grad_norm > 0:
@@ -3027,6 +3082,7 @@ def main():
             args.lr_schedule,
             args.decay_steps,
             args.text_aligner_weight_decay,
+            args.fusion_gentle_warmup,
         )
     elif args.init_optimizer_from:
         raise ValueError("--init-optimizer-from needs the grouped optimizer (set --fusion-lr / --text-aligner-lr ...)")
