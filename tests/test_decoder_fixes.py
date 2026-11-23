@@ -106,6 +106,21 @@ def test_pull_to_voice_onset_leaves_short_lead_ins():
     assert spans[0][0].start == 150
 
 
+def test_vocal_activity_reads_loudness_at_the_true_frame_times():
+    from echora_kara.engine.ctc_segmentation import vocal_activity
+
+    # Silence, then signal from 0.5 s. Stitched chunks drop a frame at each seam, so a late frame's
+    # true time runs ahead of index x 20 ms: here every frame is 100 ms (5 frames) further on.
+    waveform = torch.cat((torch.zeros(8000), torch.sin(torch.arange(16000, dtype=torch.float32))))
+    nominal = vocal_activity(waveform, 40)
+    assert nominal[:24].max() < 0.1 and nominal[26:].min() > 0.9
+    times = torch.arange(40, dtype=torch.float64) * 0.02 + 0.0125 + 0.1
+    shifted = vocal_activity(waveform, 40, frame_times=times)
+    assert shifted[:19].max() < 0.1 and shifted[21:].min() > 0.9
+    # A clock of the wrong length is ignored, not misread.
+    assert torch.equal(vocal_activity(waveform, 40, frame_times=times[:10]), nominal)
+
+
 def test_frame_rms_has_one_value_per_frame():
     waveform = torch.ones(1, 16000)
     rms = al.frame_rms(waveform, 16000, 60, 0.02)

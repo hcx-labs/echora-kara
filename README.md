@@ -62,6 +62,16 @@ flowchart LR
 
 ## Model
 
+Two sets of weights are published, with the same layout:
+
+| Model | Stored | With MuQ | MuQ at inference |
+|---|---|---|---|
+| [`hcxlabs/echora-kara-300m`](https://huggingface.co/hcxlabs/echora-kara-300m) | 361 M | 694 M | optional: its gate stayed near zero, so it also runs without MuQ |
+| [`hcxlabs/echora-kara-700m-muq`](https://huggingface.co/hcxlabs/echora-kara-700m-muq) | 361 M | 694 M | required (`--fusion on`): trained with the gate fixed at 0.1 |
+
+Each model card reports that model's own benchmark. The recipe of the 700M MuQ model is
+[`scripts/train_700m_muq.sh`](scripts/train_700m_muq.sh).
+
 | Component | What it is | Parameters |
 |---|---|---|
 | Acoustic encoder | wav2vec2-style transformer, 24 layers, width 1024, 16 heads, convolutional front end (stride 320 at 16 kHz, so 20 ms frames). Initialised from Meta's omniASR CTC 300M v2, converted to Hugging Face `Wav2Vec2ForCTC` with a parity check | 315 M |
@@ -113,6 +123,9 @@ A model must be run with the rule set it was trained on, and checkpoints record 
   production decoder and reports word-start error (median, mean, share over 500 ms).
 
 ## Benchmark
+
+The figures in this section are for `echora-kara-300m`; `echora-kara-700m-muq` reports its own on its
+model card.
 
 Word-start error on [JamendoLyrics MultiLang](https://github.com/f90/jamendolyrics): 79 songs and 21,580
 words in English, German, Spanish and French. Songs are aligned on the original mix, with no vocal
@@ -297,6 +310,9 @@ Useful extras:
 - `--resume` continues a run on the same data.
 - `--init-optimizer-from CHECKPOINT` warm-starts the Adam moments when branching onto new data or a new
   schedule.
+- `--fusion-gate-init` and `--fusion-gate-hold-steps` start the MuQ gate at a value and keep it fixed;
+  `--fusion-gentle-warmup` keeps the MuQ LoRA untrained while the encoder is frozen. Together they make
+  the model use MuQ (see [`scripts/train_700m_muq.sh`](scripts/train_700m_muq.sh)).
 - `--fusion-lora-grow` widens a checkpoint's MuQ LoRA (rank, blocks or targets) without changing its
   output at step 0.
 
